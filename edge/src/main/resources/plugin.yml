@@ -1,0 +1,22 @@
+name: JackpotEdge
+version: 0.1.0
+main: me.nootnoot.edge.EdgePlugin
+api-version: '1.21'
+commands:
+  edge:
+    description: Start or stop a server-side rollback match on this edge.
+    usage: /edge [stop|metrics|attackspeed [<player>|all] [force]]
+  ping:
+    description: Show the simulated latency injected for you and how far ahead the sim is predicting.
+    usage: /ping
+    permission: edge.ping
+    permission-message: /ping is dev tooling and edge.ping has been revoked on this server.
+permissions:
+  edge.ping:
+    description: Read your own simulated latency and prediction depth. Dev tooling, and it only
+      ever reveals your own numbers, so it defaults to everyone the way /edge does. Revoke it with
+      a permissions plugin if a production edge should not expose it.
+    default: true
+  edge.attackspeed:
+    description: Inspect and repair a persisted ATTACK_SPEED base value.
+    default: op

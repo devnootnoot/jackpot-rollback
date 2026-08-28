@@ -1,0 +1,53 @@
+services:
+  netcode-edge:
+    image: ghcr.io/mcleagues-jackpotmc/mcleagues-docker-runner:latest
+    restart: unless-stopped
+    working_dir: /server
+    pull_policy: always
+    deploy:
+      replicas: ${REPLICAS:-1}
+      resources:
+        limits:
+          memory: ${NETCODE_EDGE_MEM_LIMIT:-6G}
+    environment:
+      SERVER_TYPE: "${SERVER_TYPE:-NETCODE_EDGE}"
+      REGION:
+      GITHUB_USERNAME:
+      GITHUB_TOKEN:
+      GIT_BRANCH: "${GIT_BRANCH:-main}"
+      GIT_REPO: "${GIT_REPO:-}"
+      NETCODE_EDGE_GIT_REPO: "${NETCODE_EDGE_GIT_REPO:-}"
+      SERVER_JAR: "${SERVER_JAR:-server.jar}"
+      JVM_FLAGS: "${JVM_FLAGS:-}"
+      STARTUP_FLAGS: "${STARTUP_FLAGS:-}"
+      NETCODE_EDGE_JVM_FLAGS: "${NETCODE_EDGE_JVM_FLAGS:--Xms2G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=50 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:+PerfDisableSharedMem -Dpaper.explicit-flush=true --enable-native-access=ALL-UNNAMED}"
+      NETCODE_EDGE_STARTUP_FLAGS: "${NETCODE_EDGE_STARTUP_FLAGS:-nogui}"
+      ACCEPT_EULA: "${ACCEPT_EULA:-true}"
+      EDGE_BROKER_ENABLED: "${EDGE_BROKER_ENABLED:-true}"
+      EDGE_ID: "${EDGE_ID:-}"
+      EDGE_EXPECTED_ARCH: "${EDGE_EXPECTED_ARCH:-x86_64}"
+      EDGE_PUBLIC_HOST: "${EDGE_PUBLIC_HOST:-}"
+      EDGE_PUBLIC_PORT: "${EDGE_PUBLIC_PORT:-25565}"
+      EDGE_DIRECT_ENABLED: "${EDGE_DIRECT_ENABLED:-true}"
+      EDGE_DIRECT_PORT: "${EDGE_DIRECT_PORT:-7787}"
+      EDGE_DIRECT_BIND: "${EDGE_DIRECT_BIND:-}"
+      EDGE_DIRECT_ADVERTISE_HOST: "${EDGE_DIRECT_ADVERTISE_HOST:-}"
+      EDGE_METRICS_ENABLED: "${EDGE_METRICS_ENABLED:-true}"
+      EDGE_METRICS_BIND: "${EDGE_METRICS_BIND:-}"
+      EDGE_METRICS_PORT: "${EDGE_METRICS_PORT:-7788}"
+      EDGE_METRICS_SIM_PROBE: "${EDGE_METRICS_SIM_PROBE:-true}"
+      EDGE_LIMBO_HOST: "${EDGE_LIMBO_HOST:-}"
+      EDGE_LIMBO_PORT: "${EDGE_LIMBO_PORT:-25565}"
+      REDIS_HOST: "${REDIS_HOST:-}"
+      REDIS_PORT: "${REDIS_PORT:-6379}"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+    ports:
+      - "${EDGE_DIRECT_HOST_PORT:-7787}:7787/udp"
+      - "${EDGE_METRICS_HOST_PORT:-7788}:7788/tcp"
+    networks:
+      cluster_overlay_nw:
+
+networks:
+  cluster_overlay_nw:
+    name: cluster_overlay_nw
+    external: true

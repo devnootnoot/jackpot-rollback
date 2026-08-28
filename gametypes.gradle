@@ -1,0 +1,222 @@
+def CORE_GAME_TYPE = 'src/main/java/me/nootnoot/modules/practice/entities/game/GameType.java'
+def CORE_GAME = 'src/main/java/me/nootnoot/modules/practice/entities/game/Game.java'
+def CORE_HANDOFF = 'src/main/java/me/nootnoot/modules/practice/managers/RollbackHandoffManager.java'
+
+def topLevelArgs = { String args ->
+    List<String> out = []
+    StringBuilder current = new StringBuilder()
+    int depth = 0
+    for (int i = 0; i < args.length(); i++) {
+        char c = args.charAt(i)
+        if (c == ('(' as char) || c == ('<' as char) || c == ('[' as char)) {
+            depth++
+            current.append(c)
+        } else if (c == (')' as char) || c == ('>' as char) || c == (']' as char)) {
+            depth--
+            current.append(c)
+        } else if (c == (',' as char) && depth == 0) {
+            out.add(current.toString().trim())
+            current = new StringBuilder()
+        } else {
+            current.append(c)
+        }
+    }
+    if (!current.toString().trim().isEmpty()) {
+        out.add(current.toString().trim())
+    }
+    return out
+}
+
+def balancedFrom = { String text, int open ->
+    int depth = 0
+    for (int i = open; i < text.length(); i++) {
+        char c = text.charAt(i)
+        if (c == ('(' as char)) {
+            depth++
+        } else if (c == (')' as char)) {
+            depth--
+            if (depth == 0) {
+                return text.substring(open + 1, i)
+            }
+        }
+    }
+    throw new GradleException('unbalanced parentheses while reading GameType.java, so the ' +
+            'production rule table could not be read at all. A check that cannot read its ' +
+            'subject is a failed check, never a pass.')
+}
+
+tasks.register('verifyGameTypeRules') {
+    group = 'verification'
+    description = 'Fail if EdgeGameTypes disagrees with the mcleagues-core GameType enum about ' +
+            'what a game type allows. The dev stack and production hold two independent ' +
+            'name-to-rules tables, so without this a local match passes while production ' +
+            'enforces something else.'
+    dependsOn ':edge:classes'
+    outputs.upToDateWhen { false }
+    doLast {
+        def configured = (project.findProperty('coreDir') as String)?.trim()
+        def core = rootProject.file(configured != null && !configured.isEmpty()
+                ? configured : '../../mcleagues/mcleagues-core')
+        def source = new File(core, CORE_GAME_TYPE)
+        if (!source.isFile()) {
+            def mode = (project.findProperty('gameTypeFence') as String)?.trim()
+            def ci = System.getenv('CI')
+            boolean fatal = configured != null ||
+                    'require'.equalsIgnoreCase(mode) ||
+                    (!'skip'.equalsIgnoreCase(mode) && ('true'.equalsIgnoreCase(ci) || '1' == ci))
+            def how = 'the mcleagues-core checkout is not at ' + core.absolutePath +
+                    ', so EdgeGameTypes was compared against nothing. Pass -PcoreDir=<path to ' +
+                    'mcleagues-core>.'
+            if (fatal) {
+                throw new GradleException(how + ' A check that proves nothing is a failure, not ' +
+                        'a pass: the dev stack quietly enforcing different rules than production ' +
+                        'is what made crystals and anchors look broken. Waive it on purpose with ' +
+                        '-PgameTypeFence=skip if this checkout genuinely has no sibling.')
+            }
+            logger.warn('WARNING: ' + how + ' Allowed only because this is a standalone ' +
+                    'checkout - set CI=true or -PgameTypeFence=require to make the same absence ' +
+                    'a failure. Nothing has checked that a local match enforces what production ' +
+                    'enforces.')
+            return
+        }
+
+        def text = source.text
+        def ctorAt = text.indexOf('GameType(boolean')
+        if (ctorAt < 0) {
+            throw new GradleException('no GameType(boolean ...) constructor in ' + source +
+                    ', so the meaning of each enum argument could not be read.')
+        }
+        def params = topLevelArgs(balancedFrom(text, text.indexOf('(', ctorAt)))
+                .collect { it.trim().tokenize(' ').last() }
+        def slotOf = { String name ->
+            int at = params.indexOf(name)
+            if (at < 0) {
+                throw new GradleException('the GameType constructor in ' + source + ' has no ' +
+                        'parameter called ' + name + '; its parameters are ' + params +
+                        '. Production changed the shape of its rule table and the dev stack is ' +
+                        'still reading the old one.')
+            }
+            return at
+        }
+        def buildingSlot = slotOf('allowBuilding')
+        def breakingSlot = slotOf('allowAllBuildingBreaking')
+        def explosionSlot = slotOf('allowExplosion')
+
+        def body = text.substring(text.indexOf('{', text.indexOf('enum GameType')) + 1)
+        body = body.substring(0, body.indexOf(';'))
+        def production = new LinkedHashMap<String, Map<String, Boolean>>()
+        def constants = (body =~ /(?m)^\s{0,8}([A-Z][A-Z0-9_]*)\s*\(/)
+        while (constants.find()) {
+            def name = constants.group(1)
+            def args = topLevelArgs(balancedFrom(body, body.indexOf('(', constants.start())))
+            def flag = { int slot ->
+                def raw = args[slot]
+                if (raw != 'true' && raw != 'false') {
+                    throw new GradleException(name + ' passes ' + raw + ' where a boolean rule ' +
+                            'flag is expected. The dev stack cannot mirror a rule it cannot read.')
+                }
+                return 'true' == raw
+            }
+            production.put(name, [
+                    building : flag(buildingSlot),
+                    breaking : flag(breakingSlot),
+                    explosion: flag(explosionSlot)
+            ])
+        }
+        if (production.isEmpty()) {
+            throw new GradleException('read no enum constants out of ' + source + '.')
+        }
+
+        def pin = { String relative, String snippet, String why ->
+            def file = new File(core, relative)
+            if (!file.isFile()) {
+                throw new GradleException('missing ' + file + ', so ' + why)
+            }
+            if (!file.text.contains(snippet)) {
+                throw new GradleException('mcleagues-core no longer contains "' + snippet +
+                        '" in ' + file.name + '. ' + why + ' EdgeGameTypes mirrors that line, so ' +
+                        'the two tables can now drift in a way comparing values cannot see.')
+            }
+        }
+        pin(CORE_HANDOFF, 'boolean vanillaBuild = game.isAllBuildingAllowed();',
+                'that is what production puts on the wire as vanillaBuild.')
+        pin(CORE_HANDOFF, 'boolean allowBucket = game.isBuildingAllowed();',
+                'that is what production puts on the wire as allowBucket.')
+        pin(CORE_HANDOFF, 'boolean allowExplosion = gt.isAllowExplosion();',
+                'that is what production puts on the wire as allowExplosion.')
+        pin(CORE_GAME, 'return this.gameType.isAllowBuilding()',
+                'that is the game-type half of allowBucket.')
+        pin(CORE_GAME, 'return this.gameType.isAllowAllBuildingBreaking()',
+                'that is the game-type half of vanillaBuild.')
+
+        def outputs = project(':edge').sourceSets.main.output.classesDirs.files
+        def loader = new URLClassLoader(outputs.collect { it.toURI().toURL() } as URL[],
+                ClassLoader.platformClassLoader)
+        def failures = []
+        try {
+            def types = loader.loadClass('me.nootnoot.edge.EdgeGameTypes')
+            def table = types.getMethod('coreRuleTable').invoke(null) as Map
+            def twins = types.getMethod('kitAliasTwins').invoke(null) as Map
+
+            def missing = production.keySet() - table.keySet()
+            if (!missing.isEmpty()) {
+                failures.add('production defines game types the dev stack has never heard of: ' +
+                        missing + '. A match on one of those runs the ' +
+                        types.getField('UNKNOWN_FALLBACK').get(null) +
+                        ' fallback locally and the real rules in production.')
+            }
+            def invented = table.keySet() - production.keySet()
+            if (!invented.isEmpty()) {
+                failures.add('the dev stack holds rules for game types production does not ' +
+                        'define: ' + invented + '. Either production dropped them or they were ' +
+                        'never real.')
+            }
+            twins.each { alias, twin ->
+                if (production.containsKey(alias)) {
+                    failures.add(alias + ' is a production game type, so it must carry its own ' +
+                            'row instead of borrowing ' + twin + '.')
+                }
+                if (!production.containsKey(twin)) {
+                    failures.add(alias + ' borrows its rules from ' + twin + ', which production ' +
+                            'does not define.')
+                }
+            }
+
+            production.each { name, flags ->
+                def row = table.get(name)
+                if (row == null) {
+                    return
+                }
+                def want = [
+                        vanillaBuild  : flags.breaking,
+                        allowBucket   : flags.building || flags.breaking,
+                        allowExplosion: flags.explosion,
+                        potSwordBoost : 'POT' == name
+                ]
+                want.each { accessor, expected ->
+                    def got = row.getClass().getMethod(accessor).invoke(row)
+                    if (got != expected) {
+                        failures.add(name + '.' + accessor + ' is ' + got + ' in the dev stack ' +
+                                'and ' + expected + ' in production')
+                    }
+                }
+            }
+        } finally {
+            loader.close()
+        }
+
+        if (!failures.isEmpty()) {
+            throw new GradleException('EdgeGameTypes and the mcleagues-core GameType enum ' +
+                    'disagree:\n  ' + failures.join('\n  ') +
+                    '\nA local match then passes while production enforces something else, which ' +
+                    'is exactly how a fixed crystal or anchor keeps looking broken. The dev table ' +
+                    'lives in edge/src/main/java/me/nootnoot/edge/EdgeGameTypes.java.')
+        }
+        logger.lifecycle('EdgeGameTypes matches all ' + production.size() +
+                ' mcleagues-core game types (read from ' + source + ')')
+    }
+}
+
+project(':edge').tasks.matching { it.name == 'check' }.configureEach {
+    it.dependsOn rootProject.tasks.named('verifyGameTypeRules')
+}

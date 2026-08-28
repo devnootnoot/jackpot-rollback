@@ -1,0 +1,7 @@
+-nowarn
+-proc:none
+-cp
+C:/Users/Admin/AppData/Local/Temp/claude/C--Users-Admin-Desktop-development-jackpot-JackpotMC/ecce0934-11d7-4761-bc15-63c462147f09/scratchpad/main;C:/Users/Admin/AppData/Local/Temp/claude/C--Users-Admin-Desktop-development-jackpot-JackpotMC/ecce0934-11d7-4761-bc15-63c462147f09/scratchpad/host;C:/Users/Admin/.gradle/caches/modules-2/files-2.1/io.papermc.paper/paper-api/1.21.11-R0.1-SNAPSHOT/20961a0e95ea65d0af88dffc9b1a90421b4dfeca/paper-api-1.21.11-R0.1-SNAPSHOT.jar;C:/Users/Admin/.gradle/caches/modules-2/files-2.1/com.github.retrooper/packetevents-spigot/2.13.0/d2e89538c7303f22856b9ab6d39f30d603cfd71c/packetevents-spigot-2.13.0.jar;C:/Users/Admin/.gradle/caches/modules-2/files-2.1/redis.clients/jedis/7.0.0/54efdac143a14b70365fbaf7cc7c41607013f3ff/jedis-7.0.0.jar;C:/Users/Admin/.gradle/caches/modules-2/files-2.1/com.google.code.gson/gson/2.13.2/48b8230771e573b54ce6e867a9001e75977fe78e/gson-2.13.2.jar;C:/Users/Admin/.gradle/caches/modules-2/files-2.1/net.kyori/adventure-api/4.14.0/e8f089092c77caaa0b0fce9ee7c309200437f9e1/adventure-api-4.14.0.jar
+-d
+C:/Users/Admin/AppData/Local/Temp/claude/C--Users-Admin-Desktop-development-jackpot-JackpotMC/ecce0934-11d7-4761-bc15-63c462147f09/scratchpad/edge
+@C:/Users/Admin/AppData/Local/Temp/claude/C--Users-Admin-Desktop-development-jackpot-JackpotMC/ecce0934-11d7-4761-bc15-63c462147f09/scratchpad/esrc.txt

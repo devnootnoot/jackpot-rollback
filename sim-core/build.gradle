@@ -1,0 +1,101 @@
+// sim-core: deterministic 1v1 combat simulation.
+//   tick(GameState, Arena, Input, Input)  + saveState/loadState (ring buffer) + checksum()
+// PURE JVM. No Minecraft, no Fabric, no rendering, no networking. Headless-testable.
+// The Phase 0 determinism harness lives here and is the project's go/no-go gate.
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+def referenceDigestFile = file('src/main/resources/me/nootnoot/sim/harness/reference-digest.txt')
+
+def collectedHarnessDir = file('build/harness')
+if (project.hasProperty('harnessDir')) {
+    collectedHarnessDir = rootProject.file(project.property('harnessDir'))
+}
+
+def harnessOutDir = file('build/harness')
+
+// Runs the harness as a standalone program. Writes a per-tick checksum stream to
+// build/harness/checksums-<os>-<arch>.txt for cross-MACHINE (Intel vs ARM) diffing.
+tasks.register('runHarness', JavaExec) {
+    group = 'verification'
+    description = 'Run the determinism harness; writes a per-tick checksum stream for cross-machine diffing.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.harness.HarnessMain'
+    workingDir = projectDir
+    args '--out', harnessOutDir.absolutePath
+    outputs.dir(harnessOutDir)
+    outputs.upToDateWhen { false }
+}
+
+tasks.register('checkHarnessDigest', JavaExec) {
+    group = 'verification'
+    description = 'Fail if the harness stream-digest differs from the committed reference digest.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.harness.HarnessMain'
+    workingDir = projectDir
+    args '--check'
+    outputs.upToDateWhen { false }
+    finalizedBy rootProject.tasks.named('verifyGatesRan')
+    doLast {
+        rootProject.ext.recordGateRan.call(path, 'harness replayed against ' + referenceDigestFile.name)
+    }
+}
+
+rootProject.ext.alwaysRunGates.add(':sim-core:checkHarnessDigest')
+
+tasks.register('harnessCounts', JavaExec) {
+    group = 'verification'
+    description = 'Report how often the scripted scenario reaches each instrumented sim entry point.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.harness.HarnessMain'
+    workingDir = projectDir
+    args '--check', '--counts', '--report-only'
+    outputs.upToDateWhen { false }
+}
+
+tasks.register('updateHarnessDigest', JavaExec) {
+    group = 'verification'
+    description = 'Re-record the committed reference digest after an intended sim change.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.harness.HarnessMain'
+    workingDir = projectDir
+    args '--write-reference', referenceDigestFile.absolutePath
+    outputs.upToDateWhen { false }
+}
+
+tasks.register('compareHarnessDigests', JavaExec) {
+    group = 'verification'
+    description = 'Compare harness checksum streams collected from several machines; fails if they differ.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.harness.HarnessCompareMain'
+    workingDir = projectDir
+    args '--dir', collectedHarnessDir.absolutePath,
+            '--min', (project.findProperty('harnessMin') ?: '2').toString(),
+            '--require-platforms', (project.findProperty('harnessPlatforms') ?: '2').toString(),
+            '--require-arches', (project.findProperty('harnessArches') ?: '2').toString()
+    if (project.hasProperty('harnessAllowSameArch')) {
+        args '--allow-same-arch'
+    }
+    outputs.upToDateWhen { false }
+}
+
+tasks.named('check') {
+    dependsOn 'checkHarnessDigest'
+}
+
+def versionFenceProperties = ['rollback.versionFence', 'mcleagues.core.dir']
+
+tasks.named('test') {
+    versionFenceProperties.each { key ->
+        def value = System.getProperty(key)
+        inputs.property(key, value).optional(true)
+        if (value != null) {
+            systemProperty key, value
+        }
+    }
+    inputs.property('CI', System.getenv('CI')).optional(true)
+}

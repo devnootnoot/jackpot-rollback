@@ -1,0 +1,140 @@
+import java.util.jar.JarFile
+
+def PROTOCOL_ENTRY = 'me/nootnoot/sim/net/Protocol.class'
+
+def fenceOf = { File jarOrDir ->
+    def loader = new URLClassLoader([jarOrDir.toURI().toURL()] as URL[], ClassLoader.platformClassLoader)
+    try {
+        return [
+                version: loader.loadClass('me.nootnoot.sim.net.Protocol').getField('VERSION').getInt(null),
+                rev    : loader.loadClass('me.nootnoot.sim.net.Protocol').getField('CHECKSUM_REV').getInt(null),
+                bytes  : loader.loadClass('me.nootnoot.sim.net.InputCodec').getField('BYTES').getInt(null)
+        ]
+    } catch (LinkageError e) {
+        throw new GradleException('could not read the version fence out of ' + jarOrDir.name + ': '
+                + e.getMessage() + '. sim-core is a Java 21 library and this check reads it with the'
+                + ' Gradle JVM, so treat an unreadable copy as a failed check, never as a pass.', e)
+    } finally {
+        loader.close()
+    }
+}
+
+ext.simFenceOf = fenceOf
+
+def simCarriersIn = { File jar, File scratch ->
+    def carriers = []
+    new JarFile(jar).withCloseable { opened ->
+        if (opened.getEntry(PROTOCOL_ENTRY) != null) {
+            carriers.add([label: jar.name, file: jar])
+        }
+        opened.entries().findAll {
+            it.name.startsWith('META-INF/jars/') && it.name.endsWith('.jar')
+        }.each { entry ->
+            def lifted = new File(scratch, jar.name + '!' + entry.name.replace('/', '_'))
+            lifted.parentFile.mkdirs()
+            opened.getInputStream(entry).withCloseable { input ->
+                lifted.withOutputStream { it << input }
+            }
+            new JarFile(lifted).withCloseable { innerJar ->
+                if (innerJar.getEntry(PROTOCOL_ENTRY) != null) {
+                    carriers.add([label: jar.name + ' -> ' + entry.name, file: lifted])
+                }
+            }
+        }
+    }
+    return carriers
+}
+
+tasks.register('verifyEmbeddedSimVersion') {
+    group = 'verification'
+    description = 'Fail if any jar in this build (or in -PjarDir) ships a sim-core whose' +
+            ' Protocol.VERSION is not the one this source tree compiles to. A jar that embeds a' +
+            ' stale sim-core still installs and still shakes hands, then aborts every match.'
+    dependsOn ':sim-core:jar', ':sim-host:jar', ':edge:jar', ':relay:jar', ':limbo:jar'
+    outputs.upToDateWhen { false }
+    finalizedBy rootProject.tasks.named('verifyGatesRan')
+    doLast {
+        def scratch = new File(rootProject.layout.buildDirectory.get().asFile, 'jarcheck')
+        delete scratch
+        scratch.mkdirs()
+
+        def expected = fenceOf(project(':sim-core').tasks.named('jar').get().archiveFile.get().asFile)
+        logger.lifecycle('this source tree compiles to Protocol.VERSION ' + expected.version
+                + ' (CHECKSUM_REV ' + expected.rev + ', InputCodec.BYTES ' + expected.bytes + ')')
+
+        def targets = []
+        def explicitDir = null
+        if (project.hasProperty('jarDir')) {
+            explicitDir = rootProject.file(project.property('jarDir'))
+            if (!explicitDir.isDirectory()) {
+                throw new GradleException('-PjarDir=' + explicitDir + ' is not a directory. A check'
+                        + ' pointed at nothing passes for the wrong reason, so this is a failure.')
+            }
+            explicitDir.eachFileRecurse { if (it.name.endsWith('.jar')) targets.add(it) }
+        } else {
+            subprojects.each { sub ->
+                def libs = new File(sub.layout.buildDirectory.get().asFile, 'libs')
+                libs.listFiles()?.each { if (it.name.endsWith('.jar')) targets.add(it) }
+            }
+        }
+        if (targets.isEmpty()) {
+            throw new GradleException('found no jars to check'
+                    + (explicitDir == null ? ' - run this after a build' : ' under ' + explicitDir))
+        }
+
+        def checked = 0
+        def failures = []
+        targets.sort { it.name }.each { jar ->
+            def carriers = simCarriersIn(jar, scratch)
+            if (carriers.isEmpty()) {
+                logger.lifecycle('  ' + jar.name + ': carries no sim-core, nothing to fence')
+                return
+            }
+            carriers.each { carrier ->
+                def found = fenceOf(carrier.file)
+                checked++
+                if (found.version == expected.version && found.rev == expected.rev) {
+                    logger.lifecycle('  ' + carrier.label + ': VERSION ' + found.version + ' OK')
+                } else {
+                    def note = carrier.label + ' embeds VERSION ' + found.version
+                            + ' (CHECKSUM_REV ' + found.rev + ') but this source tree is VERSION '
+                            + expected.version + ' (CHECKSUM_REV ' + expected.rev + ')'
+                    if (explicitDir == null) {
+                        if (jar.delete()) {
+                            note += ' - DELETED, because a jar a human can still find is a jar a'
+                                    + ' human can still install'
+                        } else {
+                            note += ' - AND IT COULD NOT BE DELETED. Close whatever is holding '
+                                    + jar + ' and build again'
+                        }
+                    }
+                    failures.add(note)
+                }
+            }
+        }
+
+        delete scratch
+        if (!failures.isEmpty()) {
+            throw new GradleException('stale sim-core inside shipped jars:\n  '
+                    + failures.join('\n  ')
+                    + '\nRebuild the jar. Installing it as is aborts every match at the version'
+                    + ' handshake, with nothing on screen to say why.')
+        }
+        if (checked == 0) {
+            throw new GradleException('checked ' + targets.size() + ' jar(s) and not one of them'
+                    + ' contained a sim-core, so this check proved nothing. Point -PjarDir at jars'
+                    + ' that embed sim-core, or drop the property to check this build\'s own jars.')
+        }
+        logger.lifecycle('verified ' + checked + ' embedded sim-core copies against VERSION '
+                + expected.version)
+        rootProject.ext.recordGateRan.call(path, checked + ' embedded sim-core copies checked')
+    }
+}
+
+rootProject.ext.alwaysRunGates.add(':verifyEmbeddedSimVersion')
+
+subprojects { sub ->
+    sub.tasks.matching { it.name == 'check' }.configureEach { checkTask ->
+        checkTask.dependsOn rootProject.tasks.named('verifyEmbeddedSimVersion')
+    }
+}

@@ -1,0 +1,189 @@
+// Root build for the rollback-netcode workspace.
+// sim-core is a PURE JVM library with ZERO Minecraft-client dependencies — this is what the
+// Phase 0 determinism harness gates. The Fabric client mod (added later) will depend on it.
+
+def fenceScripts = files('settings.gradle', 'build.gradle', 'gradle.properties',
+        'devenv.gradle', 'jarcheck.gradle', 'gametypes.gradle', 'RUNBOOK.md',
+        'sim-core/build.gradle', 'sim-host/build.gradle', 'edge/build.gradle',
+        'relay/build.gradle', 'limbo/build.gradle')
+
+def fenceModuleSources = files(['sim-core', 'sim-host', 'edge', 'relay', 'limbo'].collect {
+    fileTree(dir: file("$it/src/main/java"), include: '**/*.java')
+})
+
+def rollbackModDir = file('../pvphq-rollback-mod')
+def fenceModSources = files(
+        fileTree(dir: new File(rollbackModDir, 'src/main/java'), include: '**/*.java'),
+        new File(rollbackModDir, 'build.gradle'),
+        new File(rollbackModDir, 'stonecutter.gradle'))
+
+def mcleaguesCoreDir = file(System.getProperty('mcleagues.core.dir')
+        ?: '../../mcleagues/mcleagues-core')
+def fenceCoreSources = files(
+        fileTree(dir: new File(mcleaguesCoreDir, 'src/main/java/me/nootnoot/modules/practice'),
+                include: '**/*.java'),
+        new File(mcleaguesCoreDir, 'build.gradle.kts'))
+
+def gateEvidenceDir = new File(rootProject.projectDir, 'build/gate-evidence')
+def gateTasks = []
+
+ext.alwaysRunGates = [] as Set
+
+ext.gateEvidenceFile = { String taskPath ->
+    new File(gateEvidenceDir, taskPath.substring(1).replace(':', '.') + '.txt')
+}
+
+ext.recordGateRan = { String taskPath, String detail ->
+    def file = rootProject.ext.gateEvidenceFile.call(taskPath)
+    file.parentFile.mkdirs()
+    file.text = detail + '\n'
+}
+
+gradle.taskGraph.whenReady { graph ->
+    if (gateEvidenceDir.isDirectory()) {
+        gateEvidenceDir.listFiles()?.each { it.delete() }
+    }
+    graph.allTasks.each { candidate ->
+        if (candidate instanceof Test || rootProject.ext.alwaysRunGates.contains(candidate.path)) {
+            gateTasks.add(candidate)
+        }
+    }
+}
+
+def verifyGatesRan = tasks.register('verifyGatesRan') {
+    group = 'verification'
+    description = 'Print, per gate, whether it actually executed in THIS invocation, and fail if' +
+            ' any of them was restored from the build cache or skipped as up to date. BUILD' +
+            ' SUCCESSFUL on its own says only that no task failed - it does not say a single test' +
+            ' ran.'
+    outputs.upToDateWhen { false }
+    doLast {
+        if (gateTasks.isEmpty()) {
+            throw new GradleException('verifyGatesRan ran with no gate in the task graph, so it'
+                    + ' proved nothing. It is meant to run alongside the tests and the determinism'
+                    + ' gates:  gradlew build   or   gradlew check verifyGatesRan')
+        }
+
+        def report = []
+        def silent = []
+        gateTasks.toSorted { it.path }.each { gate ->
+            def evidence = rootProject.ext.gateEvidenceFile.call(gate.path)
+            def recorded = evidence.isFile() ? evidence.readLines() : []
+            if (!recorded.isEmpty()) {
+                def outcome = gate.state.failure == null ? 'EXECUTED  ' : 'FAILED    '
+                report.add(String.format('  %-38s %s  %s', gate.path, outcome, recorded[0]))
+                return
+            }
+            if (gate.state.failure != null) {
+                report.add(String.format('  %-38s FAILED      before it could record anything',
+                        gate.path))
+                return
+            }
+            if (!gate.state.executed) {
+                report.add(String.format('  %-38s NOT REACHED this build stopped before it',
+                        gate.path))
+                return
+            }
+            if (gate instanceof Test
+                    && gate.testClassesDirs.asFileTree.matching { include '**/*.class' }.isEmpty()) {
+                report.add(String.format('  %-38s NO TESTS    the module compiled none', gate.path))
+                return
+            }
+            def how = gate.state.skipMessage ?: 'it recorded nothing'
+            report.add(String.format('  %-38s DID NOT RUN %s', gate.path, how))
+            silent.add(gate.path + ' (' + how + ')')
+        }
+
+        logger.lifecycle('')
+        logger.lifecycle('=== what this build actually verified ===')
+        report.each { logger.lifecycle(it) }
+        logger.lifecycle('')
+
+        if (!silent.isEmpty()) {
+            throw new GradleException('these gates did not execute in this invocation:\n  '
+                    + silent.join('\n  ')
+                    + '\nA gate leaves a stamp in build/gate-evidence the moment it really runs, so'
+                    + ' a missing stamp means one of two things. Either the task failed above, in'
+                    + ' which case fix that and ignore this. Or its result was restored from the'
+                    + ' build cache or skipped as up to date, in which case this build would have'
+                    + ' printed BUILD SUCCESSFUL while running no test at all - which is exactly'
+                    + ' what this check exists to stop. Test tasks in this repository are declared'
+                    + ' non-restorable in the root build.gradle; if that declaration was removed,'
+                    + ' put it back rather than deleting this check.')
+        }
+    }
+}
+
+subprojects {
+    apply plugin: 'java-library'
+
+    group = 'me.nootnoot'
+    version = '0.1.0-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs += ['-Xlint:all', '-Xlint:-processing']
+    }
+
+    tasks.withType(Test).configureEach { testTask ->
+        useJUnitPlatform()
+        testLogging {
+            events 'passed', 'skipped', 'failed'
+            showStandardStreams = true
+        }
+        inputs.files(fenceScripts)
+                .withPropertyName('fencedRepoBuildScripts')
+                .withPathSensitivity(PathSensitivity.NAME_ONLY)
+        inputs.files(fenceModuleSources)
+                .withPropertyName('fencedSiblingModuleSources')
+                .withPathSensitivity(PathSensitivity.RELATIVE)
+        inputs.files(fenceModSources)
+                .withPropertyName('fencedRollbackModSources')
+                .withPathSensitivity(PathSensitivity.RELATIVE)
+        inputs.files(fenceCoreSources)
+                .withPropertyName('fencedMcleaguesCoreSources')
+                .withPathSensitivity(PathSensitivity.RELATIVE)
+
+        outputs.cacheIf('a test in this repository reads the mod tree, the mcleagues-core tree,'
+                + ' this build\'s own scripts and a committed golden digest, so its result is not'
+                + ' a function of any fixed input set Gradle can key a cache entry on. The inputs'
+                + ' above stay declared because they are the written record of what these tests'
+                + ' read, and because every OTHER cacheable task in this build is keyed honestly'
+                + ' - but a restored test result would be a verification claim nobody made.') {
+            false
+        }
+        outputs.upToDateWhen { false }
+
+        doFirst {
+            rootProject.ext.recordGateRan.call(testTask.path, 'started')
+        }
+        afterSuite { suite, result ->
+            if (suite.parent == null) {
+                rootProject.ext.recordGateRan.call(testTask.path, result.testCount + ' tests, '
+                        + result.failedTestCount + ' failed, ' + result.skippedTestCount
+                        + ' skipped')
+            }
+        }
+        finalizedBy verifyGatesRan
+        verifyGatesRan.configure { mustRunAfter testTask }
+    }
+
+    tasks.matching { it.name == 'check' }.configureEach { checkTask ->
+        finalizedBy verifyGatesRan
+        verifyGatesRan.configure { mustRunAfter checkTask }
+    }
+}
+
+apply from: 'devenv.gradle'
+apply from: 'jarcheck.gradle'
+apply from: 'gametypes.gradle'

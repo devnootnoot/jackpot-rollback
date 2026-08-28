@@ -1,0 +1,76 @@
+// limbo: the per-client local stub server. Each player's client is transferred here (127.0.0.1) and
+// held connected while the rollback mod drives the sim. CAPTURE-REPLAY design: the version-specific
+// configuration/join packets (registry data etc.) are replayed from capture files the operator
+// supplies; this engine handles framing, login, keep-alive, and the return→transfer-to-proxy.
+
+dependencies {
+    implementation 'io.netty:netty-all:4.1.115.Final'
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    implementation 'redis.clients:jedis:7.0.0'
+    runtimeOnly 'org.slf4j:slf4j-simple:2.0.16'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    inputs.file('limbo.properties')
+            .withPropertyName('limboConfig')
+            .withPathSensitivity(PathSensitivity.NAME_ONLY)
+    inputs.files(fileTree(dir: projectDir, include: '*.bin'))
+            .withPropertyName('limboCaptureFiles')
+            .withPathSensitivity(PathSensitivity.NAME_ONLY)
+}
+
+tasks.register('runLimbo', JavaExec) {
+    group = 'application'
+    description = 'Run the local stub limbo server (args: configPath).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.limbo.LimboServer'
+}
+
+tasks.register('runHeadlessCapture', JavaExec) {
+    group = 'application'
+    description = 'Record config/play captures with no game client. Driven by gradlew devLimboCapture.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.limbo.HeadlessCapture'
+}
+
+tasks.register('runLimboProbe', JavaExec) {
+    group = 'verification'
+    description = 'Join a running limbo headlessly and report whether it can actually serve that'
+            + ' protocol. Driven by gradlew devLimboProbe.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.limbo.LimboProbeMain'
+}
+
+tasks.register('runCaptureProxy', JavaExec) {
+    group = 'application'
+    description = 'Capture config.bin/play.bin (args: listenPort backendHost backendPort [configOut] [playOut]).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.limbo.CaptureProxy'
+}
+
+// Self-contained runnable jar for Docker (the runner image is JRE-only and just `java -jar`s it).
+// Bundles netty + slf4j. Plain Jar task instead of the Shadow plugin to stay Gradle-version-agnostic.
+// Configures the DEFAULT jar rather than adding a second task, so `build` cannot leave a stale limbo.jar
+// next to a thin, manifest-less one for a deploy step to pick the wrong file out of. See relay.
+jar {
+    archiveFileName = 'limbo.jar'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'me.nootnoot.limbo.LimboServer'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA',
+            'module-info.class', 'META-INF/versions/**/module-info.class'
+}
+
+// Kept so any existing deploy script calling :limbo:fatJar still works.
+tasks.register('fatJar') {
+    group = 'build'
+    description = 'Alias for the default jar, which is already self-contained.'
+    dependsOn tasks.named('jar')
+}

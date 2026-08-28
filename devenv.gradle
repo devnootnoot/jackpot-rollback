@@ -1,0 +1,1476 @@
+import groovy.json.JsonSlurper
+import java.util.concurrent.TimeUnit
+
+ext.devRoot = layout.buildDirectory.dir('devenv').get().asFile
+ext.paperVersion = project.findProperty('paper_api_version').toString().replace('-R0.1-SNAPSHOT', '')
+ext.paperJar = new File(ext.devRoot, 'paper-' + ext.paperVersion + '.jar')
+ext.FLAT_SETTINGS = '{"layers":[{"block":"bedrock","height":1},{"block":"dirt","height":2},{"block":"grass_block","height":1}],"biome":"minecraft:plains"}'
+ext.edgeNodes = [
+        [name: 'edge-a', slot: 0, port: 25566, region: 'LONDON', directPort: 7787,
+         metricsPort: 7797],
+        [name: 'edge-b', slot: 1, port: 25567, region: 'ASHBURN', directPort: 7788,
+         metricsPort: 7798]
+]
+ext.realArenaDir = project.findProperty('arenaDir')
+        ?: new File(projectDir, '../../mcleagues/pvphq/mcleagues-game/plugins/mcleagues/practice/arenas')
+                .toPath().normalize().toString()
+ext.limboDir = new File(projectDir, 'limbo')
+ext.limboBindPort = (project.findProperty('limboPort') ?: '25565').toString() as int
+ext.DEV_REFEREE_SECRET = 'dev-referee-secret'
+ext.devRefereeSecret = {
+    (project.findProperty('relayControlSecret') ?: project.ext.DEV_REFEREE_SECRET).toString()
+}
+ext.devRefereePort = {
+    (project.findProperty('relayControlPort') ?: '7778').toString() as int
+}
+ext.limboReturnPort = (project.findProperty('limboReturnPort') ?: '25566').toString() as int
+
+tasks.register('devDownloadPaper') {
+    group = 'devenv'
+    description = 'Download the Paper server jar into build/devenv.'
+    doLast {
+        def jar = project.ext.paperJar
+        if (jar.exists() && jar.length() > 0) {
+            logger.lifecycle('paper already present: ' + jar)
+            return
+        }
+        project.ext.devRoot.mkdirs()
+        def api = 'https://fill.papermc.io/v3/projects/paper/versions/' + project.ext.paperVersion
+        def slurper = new groovy.json.JsonSlurper()
+        def builds = slurper.parse(new URL(api + '/builds'))
+        def stable = builds.findAll { b -> b.channel == 'STABLE' }
+        def latest = stable.isEmpty() ? builds.first() : stable.first()
+        def url = latest.downloads['server:default'].url
+        logger.lifecycle('downloading ' + url)
+        def stream = new URL(url).openStream()
+        try {
+            java.nio.file.Files.copy(stream, jar.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            stream.close()
+        }
+        logger.lifecycle('saved ' + jar + ' (' + jar.length() + ' bytes)')
+    }
+}
+
+ext.EDGE_EXPECTED_FILE = 'expected-plugin.sha256'
+
+ext.sha256Of = { File f ->
+    java.security.MessageDigest.getInstance('SHA-256').digest(f.bytes).encodeHex().toString()
+}
+
+ext.stampEdgePlugin = { File dir, String want ->
+    def marker = new File(dir, 'plugins/JackpotEdge/' + project.ext.EDGE_EXPECTED_FILE)
+    marker.parentFile.mkdirs()
+    marker.text = [
+            want,
+            '# EdgeBuildFence reads the first line above and refuses to enable when the jar it',
+            '# was loaded from hashes to anything else. Protocol.VERSION cannot catch a stale',
+            '# edge: it only moves when simulated behaviour or the checksum function moves, and',
+            '# every other edge change leaves it alone.',
+            '# written by gradlew devSetup and by :edge:jar',
+            ''
+    ].join(System.lineSeparator())
+    return marker
+}
+
+ext.EDGE_PLUGIN_FILE = 'jackpot-edge.jar'
+
+ext.EDGE_REMAP_DIR = '.paper-remapped'
+
+ext.EDGE_REMAP_INDEX = 'index.json'
+
+ext.clearRemapCache = { File pluginsDir ->
+    def remapped = new File(pluginsDir, project.ext.EDGE_REMAP_DIR)
+    if (!remapped.exists()) {
+        return ''
+    }
+    project.delete(remapped)
+    if (remapped.exists()) {
+        return 'could not clear the Paper remap cache at ' + remapped
+                + '. Paper hands the plugin the REMAPPED copy under that directory, not the jar'
+                + ' this build just wrote next to it, so a surviving entry there is what the'
+                + ' server runs. Stop every server under build/devenv and provision again:'
+                + '  gradlew devSetup'
+    }
+    return ''
+}
+
+ext.remapOriginHashes = { File pluginsDir ->
+    def index = new File(new File(pluginsDir, project.ext.EDGE_REMAP_DIR),
+            project.ext.EDGE_REMAP_INDEX)
+    def byName = [:]
+    if (!index.isFile()) {
+        return byName
+    }
+    try {
+        def root = new JsonSlurper().parse(index)
+        def hashes = (root instanceof Map) ? root['hashes'] : null
+        if (hashes instanceof Map) {
+            hashes.each { origin, name ->
+                byName[name.toString()] = origin.toString().toLowerCase(Locale.ROOT)
+            }
+        }
+    } catch (Exception unreadable) {
+        return null
+    }
+    return byName
+}
+
+ext.edgeLoadProblems = { File dir, String want ->
+    def problems = []
+    def pluginsDir = new File(dir, 'plugins')
+    if (!pluginsDir.isDirectory()) {
+        problems.add('there is no plugins directory at ' + pluginsDir)
+        return problems
+    }
+    def target = new File(pluginsDir, project.ext.EDGE_PLUGIN_FILE)
+    if (!target.isFile()) {
+        problems.add('there is no plugin at ' + target)
+        return problems
+    }
+    def deployed = project.ext.sha256Of.call(target)
+    if (deployed != want) {
+        problems.add('the plugin at ' + target + ' holds sha256 ' + deployed.substring(0, 16)
+                + ' and this tree builds ' + want.substring(0, 16))
+    }
+    pluginsDir.listFiles()?.each { f ->
+        if (f.isFile() && f.name.endsWith('.jar') && f.name != target.name) {
+            problems.add('a second jar is in the plugins directory: ' + f + '. Paper loads every'
+                    + ' jar it finds there, so that one is loaded too and this build did not'
+                    + ' write it.')
+        }
+    }
+    def remapDir = new File(pluginsDir, project.ext.EDGE_REMAP_DIR)
+    if (!remapDir.isDirectory()) {
+        return problems
+    }
+    def origins = project.ext.remapOriginHashes.call(pluginsDir)
+    remapDir.listFiles()?.each { f ->
+        if (!f.isFile() || !f.name.endsWith('.jar')) {
+            return
+        }
+        if (origins == null) {
+            problems.add('a remapped copy sits at ' + f + ' and ' + project.ext.EDGE_REMAP_DIR
+                    + '/' + project.ext.EDGE_REMAP_INDEX + ' cannot be read, so nothing on disk'
+                    + ' says which jar the server would actually be loading')
+            return
+        }
+        def origin = origins[f.name]
+        if (origin == null) {
+            problems.add('a remapped copy sits at ' + f + ' that ' + project.ext.EDGE_REMAP_INDEX
+                    + ' does not account for. Paper hands the plugin THIS file, and EdgeBuildFence'
+                    + ' falls back to hashing ' + target + ' when the index cannot say where the'
+                    + ' copy came from, so a stale copy here reads as fresh on both sides.')
+        } else if (origin != want) {
+            problems.add('the remapped copy at ' + f + ' is the remap of sha256 '
+                    + origin.substring(0, 16) + ', not of the ' + want.substring(0, 16)
+                    + ' this tree builds. That copy is what the server loads; ' + target
+                    + ' is only what it was made from.')
+        }
+    }
+    return problems
+}
+
+ext.deployEdgePlugin = { File dir, File pluginJar ->
+    def pluginsDir = new File(dir, 'plugins')
+    pluginsDir.mkdirs()
+    def target = new File(pluginsDir, project.ext.EDGE_PLUGIN_FILE)
+
+    if (!pluginJar.isFile() || pluginJar.length() == 0) {
+        throw new GradleException('the edge plugin jar ' + pluginJar + ' does not exist or is'
+                + ' empty, so there is nothing to deploy. Provisioning a server directory without'
+                + ' a plugin is how a run silently starts on the LAST jar that was there.')
+    }
+
+    pluginsDir.listFiles()?.each { f ->
+        if (f.isFile() && f.name.endsWith('.jar') && f.name != target.name) {
+            logger.lifecycle('deleting ' + f + ' - only jackpot-edge.jar is deployed here, and a'
+                    + ' second edge jar under plugins/ loads alongside it')
+            if (!f.delete()) {
+                throw new GradleException('could not delete the stray plugin jar ' + f
+                        + '. Stop the server that is holding it and provision again: leaving it'
+                        + ' there starts the run against a jar this build did not produce.')
+            }
+        }
+    }
+
+    def remapFailure = project.ext.clearRemapCache.call(pluginsDir)
+    if (!remapFailure.isEmpty()) {
+        throw new GradleException(remapFailure)
+    }
+
+    if (target.exists() && !target.delete()) {
+        throw new GradleException('could not replace ' + target + ' - something is holding it'
+                + ' open (a running server, or an editor). Refusing rather than leaving the stale'
+                + ' plugin in place: a stale edge jar aborts every match at the version fence.')
+    }
+    target.bytes = pluginJar.bytes
+    if (target.length() != pluginJar.length()) {
+        throw new GradleException('deployed ' + target + ' is ' + target.length() + ' bytes but '
+                + pluginJar + ' is ' + pluginJar.length() + ' bytes, so the copy did not land.')
+    }
+    def want = project.ext.sha256Of.call(pluginJar)
+    def got = project.ext.sha256Of.call(target)
+    if (want != got) {
+        throw new GradleException('deployed ' + target + ' does not match ' + pluginJar
+                + ' byte for byte (' + got + ' vs ' + want + ').')
+    }
+    project.ext.stampEdgePlugin.call(dir, want)
+    def fence = project.ext.simFenceOf.call(target)
+    logger.lifecycle('deployed ' + target + ' (' + target.length() + 'B, sha256 '
+            + want.substring(0, 16) + ', fence ' + fence.bytes + '/' + fence.rev + '/'
+            + fence.version + ')')
+    return fence
+}
+
+tasks.register('devSetup') {
+    group = 'devenv'
+    description = 'Provision two local edge servers under build/devenv with the edge plugin.'
+    dependsOn 'devDownloadPaper', ':edge:jar', ':relay:jar', 'verifyEmbeddedSimVersion'
+    finalizedBy 'devVerifyEdgeDeploy'
+    doLast {
+        def pidDir = new File(project.ext.devRoot, 'pids')
+        pidDir.listFiles()?.each { f ->
+            try {
+                def stale = ProcessHandle.of(Long.parseLong(f.text.trim()))
+                if (stale.isPresent() && stale.get().isAlive()) {
+                    logger.lifecycle('killing stale ' + f.name.replace('.pid', '')
+                            + ' (pid ' + f.text.trim() + ') before provisioning')
+                    stale.get().destroyForcibly()
+                    stale.get().onExit().get()
+                }
+            } catch (Exception ignored) {
+            }
+            f.delete()
+        }
+
+        def pluginJar = project(':edge').tasks.named('jar').get().archiveFile.get().asFile
+        def edgeRounds = (project.findProperty('rounds') ?: '1').toString()
+        def deployed = []
+        project.ext.edgeNodes.each { node ->
+            def dir = new File(project.ext.devRoot, node.name)
+            def oldWorld = new File(dir, 'world')
+            if (oldWorld.isDirectory() && !project.delete(oldWorld)) {
+                throw new GradleException('could not delete ' + oldWorld.absolutePath
+                        + ' - stop the dev stack first with  gradlew devStop')
+            }
+            new File(dir, 'plugins/JackpotEdge').mkdirs()
+            new File(dir, 'eula.txt').text = 'eula=true\n'
+
+            def props = new StringBuilder()
+            props.append('server-port=').append(node.port).append('\n')
+            props.append('online-mode=false\n')
+            props.append('level-type=minecraft\\:flat\n')
+            props.append('generator-settings=' + project.ext.FLAT_SETTINGS + '\n')
+            props.append('level-name=world\n')
+            props.append('gamemode=survival\n')
+            props.append('difficulty=normal\n')
+            props.append('spawn-monsters=false\n')
+            props.append('spawn-animals=false\n')
+            props.append('spawn-npcs=false\n')
+            props.append('spawn-protection=0\n')
+            props.append('allow-nether=false\n')
+            props.append('max-players=4\n')
+            props.append('view-distance=6\n')
+            props.append('simulation-distance=6\n')
+            props.append('sync-chunk-writes=false\n')
+            props.append('motd=jackpot edge ').append(node.name).append('\n')
+            new File(dir, 'server.properties').text = props.toString()
+
+            def cfg = new StringBuilder()
+            cfg.append('slot: ').append(node.slot).append('\n')
+            cfg.append('session-id: 1\n')
+            cfg.append('relay-host: 127.0.0.1\n')
+            cfg.append('relay-port: 7777\n')
+            cfg.append('direct:\n')
+            cfg.append('  enabled: true\n')
+            cfg.append('  port: ').append(node.directPort).append('\n')
+            cfg.append('  advertise-host: 127.0.0.1\n')
+            cfg.append('metrics:\n')
+            cfg.append('  enabled: true\n')
+            cfg.append('  port: ').append(node.metricsPort).append('\n')
+            cfg.append('arena-file: arena.bin\n')
+            cfg.append('arena-handshake-timeout-ticks: 600\n')
+            cfg.append('rounds: ').append(edgeRounds).append('\n')
+            cfg.append('arena:\n')
+            cfg.append('  paste: true\n')
+            cfg.append('  blocks-per-tick: 16384\n')
+            cfg.append('  millis-per-tick: 30\n')
+            cfg.append('  refuse-on-clip: true\n')
+            cfg.append('spawn:\n')
+            cfg.append('  x0: -4.0\n')
+            cfg.append('  z0: 0.0\n')
+            cfg.append('  x1: 4.0\n')
+            cfg.append('  z1: 0.0\n')
+            def NL = "\n"
+            boolean devKit = !project.hasProperty('noDevKit')
+            cfg.append('dev-kit:').append(NL)
+            cfg.append('  enabled: ').append(devKit).append(NL)
+            boolean brokered = project.hasProperty('broker')
+                    || gradle.taskGraph.allTasks.any { it.name == 'devRunBrokered' }
+            cfg.append('broker:').append(NL)
+            cfg.append('  enabled: ').append(brokered).append(NL)
+            cfg.append('  edge-id: ').append(node.name).append(NL)
+            cfg.append('  region: ').append(node.region).append(NL)
+            cfg.append('  public-host: 127.0.0.1').append(NL)
+            cfg.append('  public-port: ').append(node.port).append(NL)
+            cfg.append('  redis-host: 127.0.0.1').append(NL)
+            cfg.append('  redis-port: 6380').append(NL)
+            cfg.append('mod:').append(NL)
+            cfg.append('  limbo-host: 127.0.0.1').append(NL)
+            cfg.append('  limbo-port: ').append(project.ext.limboBindPort).append(NL)
+            cfg.append('  transfer-delay-ticks: 40').append(NL)
+            cfg.append('  require-hello: ')
+                    .append(!project.hasProperty('allowUnmoddedHandoff')).append(NL)
+            new File(dir, 'plugins/JackpotEdge/config.yml').text = cfg.toString()
+
+            def fence = project.ext.deployEdgePlugin.call(dir, pluginJar)
+            deployed.add([node: node.name, fence: fence])
+            logger.lifecycle('provisioned ' + dir + ' (slot ' + node.slot + ', port ' + node.port + ')')
+        }
+        if (deployed.size() != project.ext.edgeNodes.size()) {
+            throw new GradleException('provisioned ' + deployed.size() + ' of '
+                    + project.ext.edgeNodes.size() + ' edge nodes. A run with one node holding an'
+                    + ' older plugin aborts every match at the version fence.')
+        }
+        def fences = deployed.collect { it.fence.version }.unique()
+        if (fences.size() != 1) {
+            throw new GradleException('the provisioned edges do not agree on a protocol version: '
+                    + deployed.collect { it.node + '=' + it.fence.version }.join(', '))
+        }
+        logger.lifecycle('every edge under build/devenv now runs protocol version ' + fences[0]
+                + ' (inputBytes/checksumRev/protocolVersion '
+                + deployed[0].fence.bytes + '/' + deployed[0].fence.rev + '/' + fences[0] + ').'
+                + ' A modded client must be built from the same tree or the match aborts on the'
+                + ' fence: pvphq-rollback-mod, gradlew verifyModJars.')
+        logger.lifecycle('')
+        logger.lifecycle('mod handoff: an assignment whose own hostKind is MOD is NOT hosted by its'
+                + ' edge. That edge sends the client match_setup + arena + cage and transfers it to'
+                + ' the limbo on 127.0.0.1:' + project.ext.limboBindPort + '. Push one with'
+                + ' gradlew devAssign -Pmod=A|B|both.')
+        logger.lifecycle('run it with:  gradlew devRun')
+        logger.lifecycle('direct edge links: edge-a listens on udp/7787, edge-b on udp/7788. A'
+                + ' brokered assignment carrying a peer endpoint skips the relay entirely; the'
+                + ' relay is still started and is still used for the modded client path, for a'
+                + ' peer that advertises no direct port, and whenever both players land on one'
+                + ' edge. Set rollback.edge.direct-links: true in mcleagues-core to turn it on.')
+        logger.lifecycle('optional: gradlew devSampleArena  (real voxel arena instead of the flat fallback)')
+        logger.lifecycle('optional: gradlew devSetup -Prounds=3  (/edge best-of: first to 3 rounds,'
+                + ' written into BOTH edge configs)')
+        logger.lifecycle('dev-kit.enabled=true in BOTH edge configs by default: assignments with no'
+                + ' setup bytes get the demo kit for their gameType. Pass -PnoDevKit to start'
+                + ' empty-handed.')
+        logger.lifecycle('the demo kit is NOT a real kit - only mcleagues-core puts real setup bytes'
+                + ' on an assignment. Pick one with:'
+                + ' gradlew devAssign -PplayerA=x -PplayerB=y -PgameType=NETHERITE_POT')
+        logger.lifecycle('arena: a core assignment ships the real arena bytes and both edges load'
+                + ' them from redis. devAssign can do the same now:'
+                + ' gradlew devAssign -PplayerA=x -PplayerB=y -ParenaName=colosseum'
+                + ' (reading ' + project.ext.realArenaDir + ').'
+                + ' Without -ParenaName it still ships nothing, so arena.bin'
+                + ' (gradlew devSampleArena) or the flat fallback is used locally.')
+    }
+}
+
+tasks.register('devStampEdgePlugin') {
+    group = 'devenv'
+    description = 'Push the edge plugin that was just built into every dev server directory that' +
+            ' already exists, and stamp the build every one of them must match at startup.' +
+            ' Runs automatically after :edge:jar so a plain gradlew build cannot leave the dev' +
+            ' stack running the edge from an earlier build.'
+    dependsOn ':edge:jar'
+    outputs.upToDateWhen { false }
+    doLast {
+        def pluginJar = project(':edge').tasks.named('jar').get().archiveFile.get().asFile
+        if (!pluginJar.isFile() || pluginJar.length() == 0) {
+            return
+        }
+        def want = project.ext.sha256Of.call(pluginJar)
+        project.ext.edgeNodes.each { node ->
+            def dir = new File(project.ext.devRoot, node.name)
+            if (!dir.isDirectory()) {
+                return
+            }
+            def pluginsDir = new File(dir, 'plugins')
+            def target = new File(pluginsDir, project.ext.EDGE_PLUGIN_FILE)
+            boolean copied = false
+            String remapFailure = ''
+            try {
+                pluginsDir.mkdirs()
+                remapFailure = project.ext.clearRemapCache.call(pluginsDir)
+                target.bytes = pluginJar.bytes
+                copied = want == project.ext.sha256Of.call(target)
+            } catch (Exception ignored) {
+                copied = false
+            }
+            project.ext.stampEdgePlugin.call(dir, want)
+            if (!remapFailure.isEmpty()) {
+                logger.error(remapFailure)
+            }
+            if (copied && remapFailure.isEmpty()) {
+                logger.lifecycle('refreshed ' + target + ' (sha256 ' + want.substring(0, 16)
+                        + ', Paper remap cache cleared)')
+            } else if (copied) {
+                logger.error('refreshed ' + target + ' but the remap cache under ' + pluginsDir
+                        + '/' + project.ext.EDGE_REMAP_DIR + ' survived, so ' + node.name
+                        + ' would still load the previous build. Stop it and run:  gradlew devSetup')
+            } else {
+                logger.error('COULD NOT REFRESH ' + target + ' - something is holding it open,'
+                        + ' almost certainly a server started from an earlier build. The startup'
+                        + ' fence for ' + node.name + ' now expects ' + want.substring(0, 16)
+                        + ', so that server refuses to enable its plugin instead of running'
+                        + ' source nobody is reading. Stop it and run:  gradlew devSetup')
+            }
+        }
+    }
+}
+
+project(':edge').tasks.named('jar').configure { finalizedBy rootProject.tasks.named('devStampEdgePlugin') }
+
+tasks.register('devVerifyEdgeDeploy') {
+    group = 'verification'
+    description = 'Fail if what a provisioned dev edge would actually LOAD is not the plugin this' +
+            ' source tree builds right now. That is the jar under plugins/, every other jar in' +
+            ' that directory, and the Paper remap cache that shadows all of them.'
+    dependsOn ':edge:jar'
+    mustRunAfter 'devSetup'
+    outputs.upToDateWhen { false }
+    doLast {
+        def pluginJar = project(':edge').tasks.named('jar').get().archiveFile.get().asFile
+        if (!pluginJar.isFile() || pluginJar.length() == 0) {
+            throw new GradleException(':edge:jar produced nothing at ' + pluginJar
+                    + ', so there is no build to compare the dev stack against.')
+        }
+        def want = project.ext.sha256Of.call(pluginJar)
+        def problems = []
+        def checked = 0
+        project.ext.edgeNodes.each { node ->
+            def dir = new File(project.ext.devRoot, node.name)
+            if (!dir.isDirectory()) {
+                problems.add(node.name + ' is not provisioned at all (' + dir + ')')
+                return
+            }
+            def loadProblems = project.ext.edgeLoadProblems.call(dir, want)
+            if (!loadProblems.isEmpty()) {
+                loadProblems.each { problems.add(node.name + ': ' + it) }
+                return
+            }
+            checked++
+            def marker = new File(dir, 'plugins/JackpotEdge/' + project.ext.EDGE_EXPECTED_FILE)
+            if (!marker.isFile()) {
+                problems.add(node.name + ' has no ' + project.ext.EDGE_EXPECTED_FILE
+                        + ', so its plugin would enable without checking anything')
+                return
+            }
+            def stamped = marker.readLines().find { !it.trim().isEmpty() && !it.trim().startsWith('#') }
+            if (stamped?.trim() != want) {
+                problems.add(node.name + ' is stamped ' + stamped + ' and this tree builds ' + want)
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new GradleException(([
+                    'the dev stack under ' + project.ext.devRoot + ' is not running this source'
+                            + ' tree:'
+            ] + problems.collect { '  ' + it } + [
+                    'Provision it with:  gradlew devSetup'
+            ]).join(System.lineSeparator()))
+        }
+        if (checked != project.ext.edgeNodes.size()) {
+            throw new GradleException('checked ' + checked + ' of '
+                    + project.ext.edgeNodes.size() + ' edges, so this proved nothing.')
+        }
+        logger.lifecycle('every provisioned edge would LOAD this build (sha256 '
+                + want.substring(0, 16) + '): one jar under plugins/, no second jar beside it, and'
+                + ' no ' + project.ext.EDGE_REMAP_DIR + ' copy of any other build shadowing it.'
+                + ' Prove it against a running server with:  gradlew devVerifyEdgeBoot')
+    }
+}
+
+tasks.register('devVerifyEdgeBoot') {
+    group = 'verification'
+    description = 'Start every provisioned edge for real and fail unless its own build fence says' +
+            ' on the way up that the plugin it loaded is this build. devVerifyEdgeDeploy reads' +
+            ' the disk; this reads the server.'
+    dependsOn 'devDownloadPaper', ':edge:jar'
+    mustRunAfter 'devSetup', 'devVerifyEdgeDeploy'
+    outputs.upToDateWhen { false }
+    doLast {
+        def pluginJar = project(':edge').tasks.named('jar').get().archiveFile.get().asFile
+        def want = project.ext.sha256Of.call(pluginJar)
+        def fence = project.ext.simFenceOf.call(pluginJar)
+        def javaExe = System.getProperty('java.home') + '/bin/java'
+        def timeoutMs = ((project.findProperty('bootTimeoutSeconds') ?: '300').toString() as int) * 1000L
+        def running = []
+        project.ext.edgeNodes.each { node ->
+            def dir = new File(project.ext.devRoot, node.name)
+            if (!dir.isDirectory()) {
+                throw new GradleException(node.name + ' is not provisioned at ' + dir
+                        + '. Run:  gradlew devSetup')
+            }
+            def pb = new ProcessBuilder([javaExe, '-Xms1G', '-Xmx2G', '-jar',
+                                         project.ext.paperJar.absolutePath, '--nogui'])
+            pb.directory(dir)
+            pb.redirectErrorStream(true)
+            def proc = pb.start()
+            def state = [fenceOk: false, stale: false, version: -1, done: false]
+            def reader = new Thread({
+                proc.inputStream.eachLine { line ->
+                    println('[' + node.name + '] ' + line)
+                    synchronized (state) {
+                        if (line.contains('STALE EDGE PLUGIN')) {
+                            state.stale = true
+                        }
+                        if (line.contains('build fence: this plugin is the jar the last gradle'
+                                + ' build produced (sha256 ' + want.substring(0, 16) + ')')) {
+                            state.fenceOk = true
+                        }
+                        def match = line =~ /protocolVersion=(-?\d+)/
+                        if (match.find()) {
+                            state.version = match.group(1) as int
+                        }
+                        if (line.contains('edge ready: slot=')) {
+                            state.done = true
+                        }
+                    }
+                }
+            })
+            reader.setDaemon(true)
+            reader.start()
+            running.add([node: node, proc: proc, state: state])
+        }
+        def deadline = System.currentTimeMillis() + timeoutMs
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                boolean settled = running.every { r ->
+                    synchronized (r.state) {
+                        return r.state.stale
+                                || (r.state.done && r.state.fenceOk && r.state.version >= 0)
+                                || !r.proc.isAlive()
+                    }
+                }
+                if (settled) {
+                    break
+                }
+                Thread.sleep(500)
+            }
+        } finally {
+            running.each { r ->
+                try {
+                    r.proc.outputStream.write("stop\n".getBytes('UTF-8'))
+                    r.proc.outputStream.flush()
+                } catch (Exception ignored) {
+                }
+            }
+            running.each { r ->
+                if (!r.proc.waitFor(45, TimeUnit.SECONDS)) {
+                    r.proc.destroyForcibly()
+                    r.proc.waitFor()
+                }
+            }
+        }
+        def problems = []
+        running.each { r ->
+            def s = r.state
+            if (s.stale) {
+                problems.add(r.node.name + ' refused to enable its plugin: its own build fence'
+                        + ' says the jar it LOADED is not the one this tree built')
+            } else if (!s.fenceOk) {
+                problems.add(r.node.name + ' never printed the build fence for sha256 '
+                        + want.substring(0, 16) + ', so nothing on that server confirmed which'
+                        + ' plugin it is running')
+            }
+            if (s.version != fence.version) {
+                problems.add(r.node.name + ' came up on protocolVersion ' + s.version
+                        + ' and this tree builds ' + fence.version)
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new GradleException((['a real boot of the dev stack did not run this build:']
+                    + problems.collect { '  ' + it }
+                    + ['Provision it with:  gradlew devSetup']).join(System.lineSeparator()))
+        }
+        logger.lifecycle('')
+        logger.lifecycle('every edge STARTED, loaded sha256 ' + want.substring(0, 16)
+                + ' and reported protocolVersion ' + fence.version + ' (checksumRev ' + fence.rev
+                + ', inputBytes ' + fence.bytes + '), then stopped again')
+    }
+}
+
+tasks.register('devSampleArena', JavaExec) {
+    group = 'devenv'
+    description = 'Write a sample voxel arena into both dev edges. devRun does this by default;' +
+            ' pass -PflatArena to skip it and fall back to the flat plane.'
+    mustRunAfter 'devSetup'
+    dependsOn ':sim-core:classes'
+    classpath = project(':sim-core').sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.tools.SampleArenaMain'
+    systemProperty 'arena.radius', (project.findProperty('arenaRadius') ?: '48').toString()
+    systemProperty 'arena.surface', (project.findProperty('arenaSurface') ?: '-61').toString()
+    systemProperty 'arena.wall-height', (project.findProperty('arenaWallHeight') ?: '8').toString()
+    systemProperty 'arena.seed', (project.findProperty('arenaSeed') ?: '1337').toString()
+    args = project.ext.edgeNodes.collect { node ->
+        new File(project.ext.devRoot, node.name + '/plugins/JackpotEdge/arena.bin').absolutePath
+    }
+    doFirst {
+        project.ext.edgeNodes.each { node ->
+            new File(project.ext.devRoot, node.name + '/plugins/JackpotEdge').mkdirs()
+        }
+    }
+    doLast {
+        logger.lifecycle('')
+        logger.lifecycle('both edges now load arena.bin; delete those files to go back to the flat fallback')
+        logger.lifecycle('this matters for the CRYSTAL kit: Combat.blastResistanceAt and'
+                + ' Combat.scatterFire read terrain through isSolidVoxel/isDecorVoxel, and the flat'
+                + ' fallback has no voxels at all - on it a crystal or anchor blast breaks nothing,'
+                + ' leaves no crater, starts no fire, and the pickaxe can mine nothing.')
+    }
+}
+
+ext.limboVersions = [
+        [mc: '1.21.11', protocol: 774, slot: 'main'],
+        [mc: '26.1.2', protocol: 775, slot: 'alt'],
+        [mc: '26.2', protocol: 776, slot: 'capture.2']
+]
+ext.limboCaptureFile = { String mc, String phase ->
+    new File(ext.limboDir, '1.21.11' == mc ? phase + '.bin' : phase + '-' + mc + '.bin')
+}
+ext.limboCaptures = ext.limboVersions.collectMany { v ->
+    [ext.limboCaptureFile(v.mc, 'config'), ext.limboCaptureFile(v.mc, 'play')]
+}
+ext.limboMissing = { ->
+    ext.limboVersions.findAll { v ->
+        [ext.limboCaptureFile(v.mc, 'config'), ext.limboCaptureFile(v.mc, 'play')]
+                .any { f -> !f.exists() || f.length() == 0 }
+    }
+}
+ext.limboReady = { ext.limboMissing.call().isEmpty() }
+
+tasks.register('devLimboConfig') {
+    group = 'devenv'
+    description = 'Write build/devenv/limbo.properties, pointing the limbo at the checked-in captures.'
+    doLast {
+        project.ext.devRoot.mkdirs()
+        def src = new File(project.ext.limboDir, 'limbo.properties')
+        def props = new Properties()
+        if (src.exists()) {
+            src.withInputStream { s -> props.load(s) }
+        }
+        props.setProperty('bind.host', '127.0.0.1')
+        props.setProperty('bind.port', String.valueOf(project.ext.limboBindPort))
+        props.setProperty('proxy.host', '127.0.0.1')
+        props.setProperty('proxy.port', String.valueOf(project.ext.limboReturnPort))
+        project.ext.limboVersions.each { v ->
+            def cfg = project.ext.limboCaptureFile(v.mc, 'config').absolutePath
+            def play = project.ext.limboCaptureFile(v.mc, 'play').absolutePath
+            if (v.slot == 'main') {
+                props.setProperty('packets.config', cfg)
+                props.setProperty('packets.play', play)
+            } else if (v.slot == 'alt') {
+                props.setProperty('packets.config.alt', cfg)
+                props.setProperty('packets.play.alt', play)
+            } else {
+                props.setProperty(v.slot + '.config', cfg)
+                props.setProperty(v.slot + '.play', play)
+            }
+        }
+        props.setProperty('forwarding.secret', '')
+        props.setProperty('play.native.enabled', 'false')
+        props.setProperty('redis.host', '')
+        def missing = project.ext.limboMissing.call()
+        props.setProperty('captures.lenient', String.valueOf(!missing.isEmpty()))
+        def out = new File(project.ext.devRoot, 'limbo.properties')
+        out.withOutputStream { s -> props.store(s, 'generated by gradlew devLimboConfig') }
+        logger.lifecycle('wrote ' + out)
+        logger.lifecycle('  listening on 127.0.0.1:' + project.ext.limboBindPort
+                + ', return transfers go to 127.0.0.1:' + project.ext.limboReturnPort)
+        logger.lifecycle('  serving ' + project.ext.limboVersions.collect {
+            it.mc + '/' + it.protocol
+        }.join(', '))
+        if (!missing.isEmpty()) {
+            logger.error('')
+            logger.error('  ################################################################')
+            logger.error('  ##  NO LIMBO CAPTURE FOR: ' + missing.collect { it.mc + ' (protocol '
+                    + it.protocol + ')' }.join(', '))
+            logger.error('  ##  A client on that Minecraft version CANNOT be transferred to the')
+            logger.error('  ##  limbo at all - it is refused at login. Every MOD-hosted slot on')
+            logger.error('  ##  that version is dead before the match starts.')
+            missing.each { v ->
+                logger.error('  ##    gradlew devLimboCapture -PcaptureVersion=' + v.mc)
+            }
+            logger.error('  ################################################################')
+            logger.error('')
+        }
+    }
+}
+
+tasks.register('devLimboCapture') {
+    group = 'devenv'
+    description = 'Record the limbo config/play capture for one Minecraft version, with no human and no' +
+            ' game client: it downloads that version of Paper, reads the packet ids out of the' +
+            ' server\'s own --reports packet report, logs a headless client in and writes' +
+            ' limbo/config-<version>.bin + limbo/play-<version>.bin.\n' +
+            '  gradlew devLimboCapture -PcaptureVersion=26.1.2 [-PcapturePort=25599]\n' +
+            '                          [-PcaptureViewDistance=8] [-PcapturePlayMs=12000]'
+    doLast {
+        def mc = (project.findProperty('captureVersion') ?: '').toString()
+        if (mc.isEmpty()) {
+            throw new GradleException('pass -PcaptureVersion=<minecraft version>, one of '
+                    + project.ext.limboVersions.collect { it.mc })
+        }
+        def port = (project.findProperty('capturePort') ?: '25599').toString() as int
+        def viewDistance = (project.findProperty('captureViewDistance') ?: '8').toString() as int
+        def playMs = (project.findProperty('capturePlayMs') ?: '12000').toString()
+
+        def jar = project.ext.downloadPaper.call(mc)
+        def meta = project.ext.paperVersionMeta.call(jar)
+        logger.lifecycle('capturing ' + mc + ': protocol ' + meta.protocol + ', needs java '
+                + meta.java)
+        def javaExe = project.ext.javaLauncherFor.call(meta.java)
+        def reports = project.ext.paperPacketReport.call(mc, jar, javaExe)
+
+        def dir = new File(project.ext.devRoot, 'capture-' + mc)
+        dir.mkdirs()
+        new File(dir, 'eula.txt').text = 'eula=true\n'
+        def props = new StringBuilder()
+        props.append('server-port=').append(port).append('\n')
+        props.append('online-mode=false\n')
+        props.append('network-compression-threshold=-1\n')
+        props.append('level-type=minecraft\\:flat\n')
+        props.append('generator-settings=' + project.ext.FLAT_SETTINGS + '\n')
+        props.append('level-name=world\n')
+        props.append('level-seed=jackpotlimbo\n')
+        props.append('gamemode=survival\n')
+        props.append('difficulty=peaceful\n')
+        props.append('spawn-monsters=false\n')
+        props.append('spawn-protection=0\n')
+        props.append('allow-nether=false\n')
+        props.append('max-players=2\n')
+        props.append('view-distance=').append(viewDistance).append('\n')
+        props.append('simulation-distance=4\n')
+        props.append('sync-chunk-writes=false\n')
+        props.append('enable-status=true\n')
+        props.append('motd=limbo capture\n')
+        new File(dir, 'server.properties').text = props.toString()
+
+        def serverProc = new ProcessBuilder([javaExe, '-Xms1G', '-Xmx2G', '-jar',
+                                             jar.absolutePath, '--nogui'])
+                .directory(dir).redirectErrorStream(true).start()
+        def ready = new java.util.concurrent.CountDownLatch(1)
+        def pump = new Thread({
+            serverProc.inputStream.eachLine { line ->
+                println('[capture-server] ' + line)
+                if (line.contains('Done (') || line.contains('For help, type')) {
+                    ready.countDown()
+                }
+            }
+        })
+        pump.setDaemon(true)
+        pump.start()
+        try {
+            if (!ready.await(600, java.util.concurrent.TimeUnit.SECONDS)) {
+                throw new GradleException('the ' + mc + ' capture server never finished starting')
+            }
+            Thread.sleep(2000)
+
+            def configOut = project.ext.limboCaptureFile(mc, 'config')
+            def playOut = project.ext.limboCaptureFile(mc, 'play')
+            def cp = project(':limbo').sourceSets.main.runtimeClasspath.asPath
+            def args = ['-cp', cp,
+                        '-Dcapture.host=127.0.0.1',
+                        '-Dcapture.port=' + port,
+                        '-Dcapture.protocol=' + meta.protocol,
+                        '-Dcapture.username=LimboCapture',
+                        '-Dcapture.viewDistance=' + viewDistance,
+                        '-Dcapture.play.ms=' + playMs,
+                        '-Dcapture.config.out=' + configOut.absolutePath,
+                        '-Dcapture.play.out=' + playOut.absolutePath]
+            project.ext.captureIdProperties.call(reports).each { k, v -> args.add('-D' + k + '=' + v) }
+            args.add('me.nootnoot.limbo.HeadlessCapture')
+            def clientProc = new ProcessBuilder([javaExe] + args)
+                    .directory(project.ext.devRoot).redirectErrorStream(true).start()
+            clientProc.inputStream.eachLine { line -> println('[capture] ' + line) }
+            int code = clientProc.waitFor()
+            if (code != 0) {
+                throw new GradleException('the headless capture client failed with exit ' + code)
+            }
+            logger.lifecycle('')
+            logger.lifecycle('wrote ' + configOut + ' (' + configOut.length() + 'B)')
+            logger.lifecycle('wrote ' + playOut + ' (' + playOut.length() + 'B)')
+            logger.lifecycle('now run:  gradlew devLimboConfig devLimboProbe')
+        } finally {
+            serverProc.destroy()
+            serverProc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+            serverProc.destroyForcibly()
+        }
+    }
+}
+
+tasks.register('devLimboProbe') {
+    group = 'devenv'
+    description = 'Start the limbo on a scratch port and PROVE that a client of every configured' +
+            ' Minecraft version can log in, spawn and be transferred back out again. Fails the' +
+            ' build if any of them cannot.'
+    dependsOn 'devLimboConfig', ':limbo:jar'
+    doLast {
+        def javaExe = System.getProperty('java.home') + '/bin/java'
+        def cfgFile = new File(project.ext.devRoot, 'limbo.properties')
+        def props = new Properties()
+        cfgFile.withInputStream { s -> props.load(s) }
+        def probePort = (project.findProperty('probePort') ?: '25597').toString() as int
+        props.setProperty('bind.port', String.valueOf(probePort))
+        props.setProperty('captures.lenient', 'true')
+        def probeCfg = new File(project.ext.devRoot, 'limbo-probe.properties')
+        probeCfg.withOutputStream { s -> props.store(s, 'generated by gradlew devLimboProbe') }
+
+        def limboJar = project(':limbo').tasks.named('jar').get().archiveFile.get().asFile
+        def limboProc = new ProcessBuilder([javaExe, '-jar', limboJar.absolutePath,
+                                            probeCfg.absolutePath])
+                .directory(project.ext.devRoot).redirectErrorStream(true).start()
+        def pump = new Thread({
+            limboProc.inputStream.eachLine { line -> println('[limbo] ' + line) }
+        })
+        pump.setDaemon(true)
+        pump.start()
+        try {
+            def deadline = System.currentTimeMillis() + 60000
+            boolean up = false
+            while (!up && System.currentTimeMillis() < deadline) {
+                try {
+                    new Socket('127.0.0.1', probePort).close()
+                    up = true
+                } catch (IOException notYet) {
+                    Thread.sleep(250)
+                }
+            }
+            if (!up) {
+                throw new GradleException('the limbo never bound 127.0.0.1:' + probePort
+                        + ' - see the [limbo] lines above')
+            }
+            def cp = project(':limbo').sourceSets.main.runtimeClasspath.asPath
+            def failures = []
+            project.ext.limboVersions.each { v ->
+                def probeArgs = ['-cp', cp,
+                                 '-Dprobe.config=' + probeCfg.absolutePath,
+                                 '-Dprobe.host=127.0.0.1',
+                                 '-Dprobe.port=' + probePort,
+                                 '-Dprobe.protocol=' + v.protocol,
+                                 '-Dprobe.name=' + v.mc]
+                def report = new File(project.ext.devRoot, 'reports-' + v.mc + '/reports/packets.json')
+                if (report.exists()) {
+                    def parsed = new groovy.json.JsonSlurper().parse(report)
+                    def ids = project.ext.captureIdProperties.call(parsed)
+                    probeArgs.add('-Dprobe.id.keepAlive=' + ids['id.play.cb.keepAlive'])
+                    probeArgs.add('-Dprobe.id.transfer=' + project.ext.playTransferId.call(parsed))
+                    probeArgs.add('-Dprobe.id.customPayload=' + ids['id.play.sb.customPayload'])
+                    probeArgs.add('-Dprobe.id.chunk=' + ids['id.play.cb.chunk'])
+                    probeArgs.add('-Dprobe.id.disconnect=' + ids['id.play.cb.disconnect'])
+                } else {
+                    logger.warn('  no packet report for ' + v.mc + ' under ' + report.parentFile
+                            + ' - the play ids are NOT cross-checked against that version own packet report.'
+                            + ' Run gradlew devLimboCapture -PcaptureVersion=' + v.mc + ' once.')
+                }
+                probeArgs.add('me.nootnoot.limbo.LimboProbeMain')
+                def proc = new ProcessBuilder([javaExe] + probeArgs)
+                        .directory(project.ext.devRoot).redirectErrorStream(true).start()
+                proc.inputStream.eachLine { line -> println('[probe] ' + line) }
+                if (proc.waitFor() != 0) {
+                    failures.add(v.mc + ' (protocol ' + v.protocol + ')')
+                }
+            }
+            if (!failures.isEmpty()) {
+                throw new GradleException('the limbo CANNOT serve: ' + failures.join(', ')
+                        + '. Record the capture with gradlew devLimboCapture -PcaptureVersion=<version>')
+            }
+            logger.lifecycle('')
+            logger.lifecycle('  every configured version logged in, spawned and transferred back out.')
+        } finally {
+            limboProc.destroy()
+            limboProc.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
+            limboProc.destroyForcibly()
+        }
+    }
+}
+
+ext.downloadPaper = { String mc ->
+    def jar = new File(project.ext.devRoot, 'paper-' + mc + '.jar')
+    if (jar.exists() && jar.length() > 0) {
+        return jar
+    }
+    project.ext.devRoot.mkdirs()
+    def api = 'https://fill.papermc.io/v3/projects/paper/versions/' + mc + '/builds'
+    def builds = new groovy.json.JsonSlurper().parse(new URL(api))
+    def stable = builds.findAll { b -> b.channel == 'STABLE' }
+    def latest = stable.isEmpty() ? builds.first() : stable.first()
+    def download = latest.downloads['server:default']
+    logger.lifecycle('downloading ' + download.url + ' (' + download.size + ' bytes)')
+    def stream = new URL(download.url).openStream()
+    try {
+        java.nio.file.Files.copy(stream, jar.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    } finally {
+        stream.close()
+    }
+    def digest = java.security.MessageDigest.getInstance('SHA-256').digest(jar.bytes)
+    def hex = digest.collect { String.format('%02x', it) }.join('')
+    if (hex != download.checksums.sha256) {
+        jar.delete()
+        throw new GradleException('sha256 mismatch for ' + jar.name + ': got ' + hex
+                + ', papermc published ' + download.checksums.sha256)
+    }
+    logger.lifecycle('saved ' + jar + ' (sha256 verified)')
+    return jar
+}
+
+ext.paperVersionMeta = { File jar ->
+    def zip = new java.util.zip.ZipFile(jar)
+    try {
+        def entry = zip.getEntry('version.json')
+        if (entry == null) {
+            throw new GradleException(jar.name + ' has no version.json')
+        }
+        def json = new groovy.json.JsonSlurper().parse(zip.getInputStream(entry))
+        return [id: json.id, protocol: json.protocol_version, java: json.java_version]
+    } finally {
+        zip.close()
+    }
+}
+
+ext.javaLauncherFor = { int feature ->
+    def service = project(':limbo').extensions
+            .getByType(org.gradle.jvm.toolchain.JavaToolchainService)
+    return service.launcherFor { spec ->
+        spec.languageVersion = JavaLanguageVersion.of(feature)
+    }.get().executablePath.asFile.absolutePath
+}
+
+ext.paperPacketReport = { String mc, File jar, String javaExe ->
+    def dir = new File(project.ext.devRoot, 'reports-' + mc)
+    def report = new File(dir, 'reports/packets.json')
+    if (report.exists() && report.length() > 0) {
+        return new groovy.json.JsonSlurper().parse(report)
+    }
+    dir.mkdirs()
+    logger.lifecycle('generating the ' + mc + ' packet report (this is the source of every packet id)')
+    def proc = new ProcessBuilder([javaExe, '-DbundlerMainClass=net.minecraft.data.Main',
+                                   '-jar', jar.absolutePath, '--reports', '--output',
+                                   dir.absolutePath])
+            .directory(project.ext.devRoot).redirectErrorStream(true).start()
+    proc.inputStream.eachLine { line -> logger.info('[reports] ' + line) }
+    if (proc.waitFor() != 0 || !report.exists()) {
+        throw new GradleException('could not generate the packet report for ' + mc)
+    }
+    return new groovy.json.JsonSlurper().parse(report)
+}
+
+ext.playTransferId = { report ->
+    def entry = report['play']['clientbound']['minecraft:transfer']
+    if (entry == null) {
+        throw new GradleException('the packet report has no play/clientbound/transfer')
+    }
+    return entry.protocol_id
+}
+
+ext.captureIdProperties = { report ->
+    def pick = { String phase, String direction, String name ->
+        def entry = report[phase][direction]['minecraft:' + name]
+        if (entry == null) {
+            throw new GradleException('the packet report has no ' + phase + '/' + direction + '/' + name)
+        }
+        return entry.protocol_id
+    }
+    return [
+            'id.login.cb.finished'         : pick('login', 'clientbound', 'login_finished'),
+            'id.login.cb.disconnect'       : pick('login', 'clientbound', 'login_disconnect'),
+            'id.login.cb.compression'      : pick('login', 'clientbound', 'login_compression'),
+            'id.login.cb.customQuery'      : pick('login', 'clientbound', 'custom_query'),
+            'id.login.sb.ack'              : pick('login', 'serverbound', 'login_acknowledged'),
+            'id.login.sb.customQueryAnswer': pick('login', 'serverbound', 'custom_query_answer'),
+            'id.cfg.cb.selectKnownPacks'   : pick('configuration', 'clientbound', 'select_known_packs'),
+            'id.cfg.cb.finish'             : pick('configuration', 'clientbound', 'finish_configuration'),
+            'id.cfg.cb.keepAlive'          : pick('configuration', 'clientbound', 'keep_alive'),
+            'id.cfg.cb.ping'               : pick('configuration', 'clientbound', 'ping'),
+            'id.cfg.cb.disconnect'         : pick('configuration', 'clientbound', 'disconnect'),
+            'id.cfg.cb.codeOfConduct'      : pick('configuration', 'clientbound', 'code_of_conduct'),
+            'id.cfg.sb.selectKnownPacks'   : pick('configuration', 'serverbound', 'select_known_packs'),
+            'id.cfg.sb.finish'             : pick('configuration', 'serverbound', 'finish_configuration'),
+            'id.cfg.sb.keepAlive'          : pick('configuration', 'serverbound', 'keep_alive'),
+            'id.cfg.sb.pong'               : pick('configuration', 'serverbound', 'pong'),
+            'id.cfg.sb.clientInformation'  : pick('configuration', 'serverbound', 'client_information'),
+            'id.cfg.sb.acceptCodeOfConduct': pick('configuration', 'serverbound', 'accept_code_of_conduct'),
+            'id.play.cb.keepAlive'         : pick('play', 'clientbound', 'keep_alive'),
+            'id.play.cb.disconnect'        : pick('play', 'clientbound', 'disconnect'),
+            'id.play.cb.playerPosition'    : pick('play', 'clientbound', 'player_position'),
+            'id.play.cb.chunk'             : pick('play', 'clientbound', 'level_chunk_with_light'),
+            'id.play.sb.keepAlive'         : pick('play', 'serverbound', 'keep_alive'),
+            'id.play.sb.acceptTeleport'    : pick('play', 'serverbound', 'accept_teleportation'),
+            'id.play.sb.customPayload'     : pick('play', 'serverbound', 'custom_payload')
+    ]
+}
+
+tasks.register('devLimbo') {
+    group = 'devenv'
+    description = 'Run ONLY the limbo (the local stub server a MOD-hosted slot is transferred to).'
+    dependsOn 'devLimboConfig', ':limbo:jar'
+    doLast {
+        def javaExe = System.getProperty('java.home') + '/bin/java'
+        def limboJar = project(':limbo').tasks.named('jar').get().archiveFile.get().asFile
+        def cfg = new File(project.ext.devRoot, 'limbo.properties')
+        def pidDir = new File(project.ext.devRoot, 'pids')
+        pidDir.mkdirs()
+        def pb = new ProcessBuilder([javaExe, '-jar', limboJar.absolutePath, cfg.absolutePath])
+        pb.directory(project.ext.devRoot)
+        pb.redirectErrorStream(true)
+        def proc = pb.start()
+        new File(pidDir, 'limbo.pid').text = String.valueOf(proc.pid())
+        Runtime.runtime.addShutdownHook(new Thread({ proc.destroy() }))
+        proc.inputStream.eachLine { line -> println('[limbo] ' + line) }
+        proc.waitFor()
+    }
+}
+
+tasks.register('devRun') {
+    group = 'devenv'
+    description = 'Start the relay, the limbo and both edge servers for local testing.'
+    dependsOn 'devSetup', 'devVerifyEdgeDeploy', 'devLimboConfig', ':limbo:jar'
+    if (!project.hasProperty('flatArena')) {
+        dependsOn 'devSampleArena'
+    }
+    doLast {
+        def procs = []
+        def javaExe = System.getProperty('java.home') + '/bin/java'
+        def relayJar = project(':relay').tasks.named('jar').get().archiveFile.get().asFile
+
+        def pidDir = new File(project.ext.devRoot, 'pids')
+        pidDir.mkdirs()
+        pidDir.listFiles()?.each { f ->
+            try {
+                def stale = ProcessHandle.of(Long.parseLong(f.text.trim()))
+                if (stale.isPresent() && stale.get().isAlive()) {
+                    logger.lifecycle('killing stale ' + f.name.replace('.pid', '')
+                            + ' (pid ' + f.text.trim() + ')')
+                    stale.get().destroyForcibly()
+                }
+            } catch (Exception ignored) {
+            }
+            f.delete()
+        }
+
+        def spawn = { List cmd, File dir, String tag, Map env = [:] ->
+            def pb = new ProcessBuilder(cmd)
+            pb.directory(dir)
+            env.each { k, v -> pb.environment().put(k.toString(), v.toString()) }
+            pb.redirectErrorStream(true)
+            def proc = pb.start()
+            procs.add(proc)
+            new File(pidDir, tag + '.pid').text = String.valueOf(proc.pid())
+            def t = new Thread({
+                proc.inputStream.eachLine { line -> println('[' + tag + '] ' + line) }
+            })
+            t.setDaemon(true)
+            t.start()
+            return proc
+        }
+
+        def relayEnv = [:]
+        if (project.hasProperty('relaySlotSecret')) {
+            relayEnv['RELAY_SLOT_SECRET'] = project.property('relaySlotSecret').toString()
+            relayEnv['RELAY_BIND'] = '127.0.0.1'
+            logger.lifecycle('relay starts in DERIVED mode: it verifies every HELLO against'
+                    + ' HMAC-SHA256(relaySlotSecret, sessionId, slot). Push assignments with the'
+                    + ' SAME -PrelaySlotSecret or the relay drops both peers of the session.')
+        }
+        boolean refereeOn = !project.hasProperty('noReferee')
+        if (refereeOn) {
+            relayEnv['RELAY_CONTROL_SECRET'] = project.ext.devRefereeSecret.call()
+            relayEnv['RELAY_CONTROL_PORT'] = project.ext.devRefereePort.call().toString()
+        }
+        spawn([javaExe, '-jar', relayJar.absolutePath, '7777'], project.ext.devRoot, 'relay',
+                relayEnv)
+        boolean limboStarted = false
+        if (!project.hasProperty('noLimbo')) {
+            def limboJar = project(':limbo').tasks.named('jar').get().archiveFile.get().asFile
+            def limboCfg = new File(project.ext.devRoot, 'limbo.properties')
+            spawn([javaExe, '-jar', limboJar.absolutePath, limboCfg.absolutePath],
+                    project.ext.devRoot, 'limbo')
+            limboStarted = true
+        }
+        def edgeEnv = [:]
+        if (project.hasProperty('relaySlotSecret')) {
+            edgeEnv['RELAY_SLOT_SECRET'] = project.property('relaySlotSecret').toString()
+        }
+        if (refereeOn) {
+            edgeEnv['RELAY_CONTROL_SECRET'] = project.ext.devRefereeSecret.call()
+            edgeEnv['RELAY_CONTROL_PORT'] = project.ext.devRefereePort.call().toString()
+        }
+        if (refereeOn && !project.hasProperty('relaySlotSecret')) {
+            logger.lifecycle('edges will NOT authorize a referee: without -PrelaySlotSecret they'
+                    + ' cannot derive the per-slot tokens the relay binds HELLO against. Duels still'
+                    + ' run, on two witnesses instead of three.')
+        }
+        project.ext.edgeNodes.each { node ->
+            def dir = new File(project.ext.devRoot, node.name)
+            spawn([javaExe, '-Xms1G', '-Xmx2G', '-jar', project.ext.paperJar.absolutePath, '--nogui'],
+                    dir, node.name, edgeEnv)
+        }
+
+        Runtime.runtime.addShutdownHook(new Thread({
+            procs.each { p -> p.destroy() }
+        }))
+
+        logger.lifecycle('')
+        logger.lifecycle('  edge-a  127.0.0.1:25566  (slot 0)')
+        logger.lifecycle('  edge-b  127.0.0.1:25567  (slot 1)')
+        logger.lifecycle('  relay   127.0.0.1:7777')
+        if (refereeOn) {
+            logger.lifecycle('  referee 127.0.0.1:' + project.ext.devRefereePort.call()
+                    + '  (tcp control endpoint, RELAY_CONTROL_SECRET='
+                    + project.ext.devRefereeSecret.call() + ')')
+            logger.lifecycle('          devAssign authorizes every session it pushes, the relay')
+            logger.lifecycle('          re-simulates both input streams and prints its signed')
+            logger.lifecycle('          verdict here as  [relay] referee verdict: ...')
+            logger.lifecycle('          in production mcleagues-core is what authorizes and what')
+            logger.lifecycle('          consumes that verdict; set rollback.referee.control-secret')
+            logger.lifecycle('          to the SAME value there. -PnoReferee starts without it.')
+        } else {
+            logger.lifecycle('  referee NOT STARTED (-PnoReferee) - results rest on the two clients')
+            logger.lifecycle('          corroborating each other, which is the degraded path')
+        }
+        project.ext.edgeNodes.each { n ->
+            logger.lifecycle('  metrics 127.0.0.1:' + n.metricsPort + '/metrics  (' + n.name
+                    + ')')
+        }
+        if (limboStarted) {
+            logger.lifecycle('  limbo   127.0.0.1:' + project.ext.limboBindPort
+                    + '  (a MOD-hosted slot is transferred here)')
+            if (!project.ext.limboReady.call()) {
+                logger.lifecycle('          NO CAPTURE FILES - the limbo will accept the connection'
+                        + ' and never spawn the client. See gradlew devLimboConfig.')
+            }
+        } else {
+            logger.lifecycle('  limbo   NOT STARTED (-PnoLimbo) - -Pmod assignments have nowhere to go')
+        }
+        logger.lifecycle('')
+        logger.lifecycle('  arena   plugins/JackpotEdge/arena.bin per node (missing = flat fallback)')
+        logger.lifecycle('')
+        logger.lifecycle('  EDGE vs EDGE : join each with a separate account, run /edge on both, or')
+        logger.lifecycle('                 push gradlew devAssign -PplayerA=x -PplayerB=y')
+        logger.lifecycle('  MOD  vs MOD  : gradlew devAssign -PplayerA=x -PplayerB=y -Pmod=both'
+                + ' -ParenaName=colosseum')
+        logger.lifecycle('  MOD  vs EDGE : gradlew devAssign -PplayerA=x -PplayerB=y -Pmod=A'
+                + ' -ParenaName=colosseum')
+        logger.lifecycle('  a MOD slot needs the rollback mod on that client AND a shipped arena.')
+        logger.lifecycle('  /edge only starts once both edges agree on the arena hash.')
+        logger.lifecycle('')
+        logger.lifecycle('  to stop: run  gradlew devStop  in another terminal')
+        logger.lifecycle('  (ctrl-c is unreliable here - gradle traps it to cancel the build)')
+        logger.lifecycle('')
+
+        procs.each { p -> p.waitFor() }
+    }
+}
+
+tasks.register('devWipeWorlds') {
+    group = 'devenv'
+    description = 'Delete the dev edge world folders so the next match pastes its arena into an' +
+            ' empty world. The dev world PERSISTS across devRun invocations and across server' +
+            ' restarts, so blocks a match left behind accumulate in it forever.'
+    doLast {
+        int wiped = 0
+        project.ext.edgeNodes.each { node ->
+            def world = new File(new File(project.ext.devRoot, node.name), 'world')
+            if (world.isDirectory()) {
+                if (!project.delete(world)) {
+                    throw new GradleException('could not delete ' + world.absolutePath
+                            + ' - stop the dev stack first with  gradlew devStop')
+                }
+                wiped++
+                logger.lifecycle('wiped ' + world.absolutePath)
+            }
+        }
+        if (wiped == 0) {
+            logger.lifecycle('no dev world folders to wipe - they are recreated on the next devRun')
+        } else {
+            logger.lifecycle('' + wiped + ' dev world(s) wiped. The flat generator rebuilds them on'
+                    + ' the next start, so the next arena paste lands in an empty world.')
+        }
+    }
+}
+
+tasks.register('devStop') {
+    group = 'devenv'
+    description = 'Stop the relay and both edge servers started by devRun.'
+    doLast {
+        def pidDir = new File(project.ext.devRoot, 'pids')
+        def files = pidDir.listFiles()
+        if (files == null || files.length == 0) {
+            logger.lifecycle('nothing to stop (no pid files in ' + pidDir + ')')
+            return
+        }
+        def handles = []
+        files.each { f ->
+            def tag = f.name.replace('.pid', '')
+            try {
+                def handle = ProcessHandle.of(Long.parseLong(f.text.trim()))
+                if (handle.isPresent() && handle.get().isAlive()) {
+                    logger.lifecycle('stopping ' + tag + ' (pid ' + f.text.trim() + ')')
+                    handle.get().destroy()
+                    handles.add(handle.get())
+                } else {
+                    logger.lifecycle(tag + ' already stopped')
+                }
+            } catch (Exception e) {
+                logger.lifecycle('could not stop ' + tag + ': ' + e)
+            }
+            f.delete()
+        }
+        def deadline = System.currentTimeMillis() + 15000
+        handles.each { h ->
+            while (h.isAlive() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(200)
+            }
+            if (h.isAlive()) {
+                logger.lifecycle('force killing pid ' + h.pid())
+                h.destroyForcibly()
+            }
+        }
+        logger.lifecycle('devenv stopped')
+    }
+}
+
+tasks.register('devClean') {
+    group = 'devenv'
+    description = 'Delete the provisioned dev servers (keeps the downloaded Paper jar).'
+    doLast {
+        project.ext.edgeNodes.each { node ->
+            project.delete(new File(project.ext.devRoot, node.name))
+        }
+    }
+}
+
+ext.devStack = new File(projectDir, 'devstack')
+
+def composeCmd = { List extra ->
+    def cmd = ['docker', 'compose', '-f', new File(project.ext.devStack, 'docker-compose.yml').absolutePath]
+    cmd.addAll(extra)
+    return cmd
+}
+
+def runCompose = { List extra, boolean failOnError ->
+    def pb = new ProcessBuilder(composeCmd(extra))
+    pb.redirectErrorStream(true)
+    def proc = pb.start()
+    proc.inputStream.eachLine { line -> println('[devstack] ' + line) }
+    int code = proc.waitFor()
+    if (code != 0 && failOnError) {
+        throw new GradleException('docker compose ' + extra.join(' ') + ' failed with exit ' + code
+                + ' - is Docker Desktop running?')
+    }
+    return code
+}
+
+tasks.register('devStackUp') {
+    group = 'devenv'
+    description = 'Start the local Redis + MongoDB used for edge testing (no production machines).'
+    doLast {
+        runCompose(['up', '-d'], true)
+        logger.lifecycle('')
+        logger.lifecycle('  redis  127.0.0.1:6380')
+        logger.lifecycle('  mongo  127.0.0.1:27018')
+        logger.lifecycle('')
+        logger.lifecycle('  gradlew devRunBrokered   two edges driven by the broker')
+        logger.lifecycle('  gradlew devStackDown     stop them again')
+    }
+}
+
+tasks.register('devStackDown') {
+    group = 'devenv'
+    description = 'Stop the local Redis + MongoDB.'
+    doLast {
+        runCompose(['down'], false)
+    }
+}
+
+tasks.register('devStackWipe') {
+    group = 'devenv'
+    description = 'Stop the local Redis + MongoDB and drop all their data.'
+    doLast {
+        runCompose(['down', '-v'], false)
+    }
+}
+
+tasks.register('devStackStatus') {
+    group = 'devenv'
+    description = 'Show the local Redis + MongoDB container state.'
+    doLast {
+        runCompose(['ps'], false)
+    }
+}
+
+tasks.register('devAssign', JavaExec) {
+    group = 'devenv'
+    description = 'Push a match assignment into the dev Redis so both edges start a brokered match.\n' +
+            '  gradlew devAssign -PplayerA=<name> -PplayerB=<name> [-PgameType=<type>]\n' +
+            '                    [-ParenaName=<arena>] [-Pmod=<who>] [-PnoDevKit]\n' +
+            '    -Pmod        which slots host the sim on their own MODDED client instead of on\n' +
+            '                 their edge. none (default) | A | B | both. A MOD slot is sent the\n' +
+            '                 match_setup + arena + cage plugin messages by its edge and then\n' +
+            '                 transferred to the limbo, which is exactly what mcleagues-core\n' +
+            '                 RollbackHandoffManager does on the network. It REQUIRES -ParenaName:\n' +
+            '                 a modded client has no local arena file to fall back on, so without\n' +
+            '                 shipped bytes it would fight on a bare plane and desync.\n' +
+            '                   -Pmod=both   MOD vs MOD   (both clients need the mod + the limbo)\n' +
+            '                   -Pmod=A      MOD vs EDGE  (cross-play; playerA is the modded one)\n' +
+            '                   (omit)       EDGE vs EDGE\n' +
+            '    -ParenaName  load a REAL arena from the practice .farena data, publish its bytes\n' +
+            '                 to the dev Redis and point BOTH slots at that one key, exactly like\n' +
+            '                 mcleagues-core does. The two edges then decode byte-identical bytes,\n' +
+            '                 so the arena handshake passes. The assignment also carries the\n' +
+            '                 arena\'s REAL ArenaSpawn coordinates (with the cage drop added), so\n' +
+            '                 there are no made-up spawn points anywhere in this path.\n' +
+            '                 examples:  -ParenaName=colosseum   -ParenaName=courtyard\n' +
+            '    -ParenaDir   where the .farena files live (default: the practice arenas folder\n' +
+            '                 next to this checkout). Run devAssign with no players to list them.\n' +
+            '    -PplayRadius X/Z half-extent extracted around the spawn midpoint (default 110,\n' +
+            '                 the largest real borderRadius + margin core uses).\n' +
+            '    NOTE: the palette geometry devAssign ships is a DEV HEURISTIC read off the block\n' +
+            '    state strings - it is the same on both edges but it is NOT the server VoxelShape\n' +
+            '    table mcleagues-core encodes. Slabs/carpets/plates are modelled, stairs and\n' +
+            '    fences are treated as full cubes. Use a real core match to test exact collision.\n' +
+            '    -PgameType   which demo kit BOTH edges build for the match. Case-insensitive, and\n' +
+            '                 matched against the mcleagues-core GameType names, so those work as-is:\n' +
+            '                   IRON           diamond sword + full iron + 64 cobblestone + 8 gapples\n' +
+            '                   DIAMOND        diamond sword + full diamond + 16 gapples + 16 pearls\n' +
+            '                   POT            diamond sword + full diamond + 25 splash healing +\n' +
+            '                                  3 splash harming + 2 speed + 2 strength +\n' +
+            '                                  2 fire resistance\n' +
+            '                   NETHERITE_POT  netherite sword + full netherite + the same pots\n' +
+            '                   CRYSTAL        full netherite + 192 end crystals + 128 obsidian +\n' +
+            '                                  64 respawn anchors + 64 glowstone + 3 loose totems +\n' +
+            '                                  1 in the off-hand + 2 totem-filled shulkers +\n' +
+            '                                  64 each of flight 1/2/3 rockets + efficiency V\n' +
+            '                                  netherite pickaxe + netherite axe + bow + a loaded\n' +
+            '                                  crossbow + a second loaded crossbow with Multishot +\n' +
+            '                                  64 arrows and 64 arrows of weakness + 64 wind\n' +
+            '                                  charges + 8 ender chests + a plain mace + a second\n' +
+            '                                  mace with Wind Burst III and Breach IV + shield +\n' +
+            '                                  water/lava buckets + cobwebs + pearls +\n' +
+            '                                  128 golden apples + 16 enchanted golden apples.\n' +
+            '                                  The ELYTRA sits in the HOTBAR\n' +
+            '                                  (slot 7 on the bar): InventoryIntents.chestEquip only\n' +
+            '                                  fires for a hotbar slot, so from storage it took an\n' +
+            '                                  inventory drag first and read as unreachable.\n' +
+            '                 EdgeGameTypes maps each production name to one of those five kits:\n' +
+            '                 SWORD/BOW/AXE -> IRON, the SMP and UHC family -> DIAMOND, POT -> POT,\n' +
+            '                 NETHERITE_POT -> NETHERITE_POT, and VANILLA, HT_VANILLA, LT_CART,\n' +
+            '                 HT_CART, CREEPER, MACE, SPEAR_MACE, SPEAR_ELYTRA and CUSTOM ->\n' +
+            '                 CRYSTAL. A name the table has never heard of, and no flag at all,\n' +
+            '                 both give CRYSTAL - the only kit with every mechanic on.\n' +
+            '                 examples:  -PgameType=CRYSTAL   -PgameType=pot   -PgameType=HT_VANILLA\n' +
+            '    -PnoDevKit   push the assignment with NO kit at all (both players empty-handed).\n' +
+            '  The demo kit is built ON each edge and encoded into the same setup bytes a real\n' +
+            '  mcleagues-core match sends, so both paths run the identical decoder. It only agrees\n' +
+            '  between the two edges when they run the same build.\n' +
+            '  Without -ParenaName devAssign carries no arena bytes and the edges use their local\n' +
+            '  arena.bin (gradlew devSampleArena) or the flat fallback, so devRun still works with\n' +
+            '  no core and no Redis.\n' +
+            '\n' +
+            '  THE REFEREE. devAssign also authorizes the session with the relay control\n' +
+            '  endpoint, which is what mcleagues-core does at handoff. The relay then\n' +
+            '  re-simulates both input streams off the packets it forwards and prints a\n' +
+            '  signed verdict in the devRun window as\n' +
+            '      [relay] referee verdict: session <id> - slot 0 wins 3-1 after ...\n' +
+            '  On the network that verdict is a third witness outranking either client, so\n' +
+            '  a loser who refuses to concede can no longer force a VOID. devAssign is not\n' +
+            '  core: it authorizes and walks away, so nothing here acts on the verdict.\n' +
+            '    -PrelayControlSecret  must match RELAY_CONTROL_SECRET on the relay. devRun\n' +
+            '                 and devAssign read the same property, so they agree by default.\n' +
+            '    -PrelayControlPort    default 7778.\n' +
+            '    -PnoReferee  push the assignment with NO third witness, which is the\n' +
+            '                 degraded two-witness path a relay with no control secret runs.'
+    doFirst {
+        def notBrokering = []
+        def unprovisioned = []
+        project.ext.edgeNodes.each { node ->
+            def cfg = new File(project.ext.devRoot, node.name + '/plugins/JackpotEdge/config.yml')
+            if (!cfg.exists()) {
+                unprovisioned.add(node.name)
+                return
+            }
+            def brokered = false
+            boolean inBroker = false
+            cfg.eachLine { line ->
+                if (line ==~ /^\S.*/) {
+                    inBroker = line.trim().startsWith('broker:')
+                }
+                if (inBroker && line.trim().startsWith('enabled:')) {
+                    brokered = line.trim().endsWith('true')
+                }
+            }
+            if (!brokered) {
+                notBrokering.add(node.name)
+            }
+        }
+        if (!unprovisioned.isEmpty()) {
+            throw new GradleException('devAssign would push an assignment nobody is listening for: '
+                    + unprovisioned.join(' and ') + ' has no plugins/JackpotEdge/config.yml under '
+                    + project.ext.devRoot + '. Run gradlew devSetup (or devRunBrokered) first.')
+        }
+        if (!notBrokering.isEmpty()) {
+            logger.error('')
+            logger.error('  ################################################################')
+            logger.error('  ##  ' + notBrokering.join(' and ')
+                    + (notBrokering.size() > 1 ? ' HAVE' : ' HAS') + ' broker.enabled: false')
+            logger.error('  ##')
+            logger.error('  ##  devAssign only pushes JSON into Redis. An edge that is not')
+            logger.error('  ##  brokering never reads that list, so this assignment would be')
+            logger.error('  ##  a SILENT no-op: no error, no match, nothing in either log.')
+            logger.error('  ##')
+            logger.error('  ##  A plain "gradlew devRun" provisions both edges with the broker')
+            logger.error('  ##  OFF. Restart them in broker mode:')
+            logger.error('  ##      gradlew devStop')
+            logger.error('  ##      gradlew devRunBrokered')
+            logger.error('  ##  and push the assignment from a second terminal.')
+            logger.error('  ##')
+            logger.error('  ##  -PforceAssign pushes anyway (only useful if you are about to')
+            logger.error('  ##  restart the edges in broker mode before the 120s TTL expires).')
+            logger.error('  ################################################################')
+            logger.error('')
+            if (!project.hasProperty('forceAssign')) {
+                throw new GradleException('refusing to push an assignment to a stack that is not'
+                        + ' brokering - see the block above')
+            }
+            logger.warn('  -PforceAssign given: pushing anyway.')
+        }
+    }
+    dependsOn ':edge:classes'
+    classpath = project(':edge').sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.edge.tools.DevAssignMain'
+    ['playerA', 'playerB', 'edgeA', 'edgeB', 'redisHost', 'redisPort', 'relayHost', 'relayPort',
+     'groundY', 'rounds', 'gameType', 'arenaName', 'playRadius', 'arenaMaxBlocks',
+     'directA', 'directB', 'mod', 'relaySlotSecret', 'lagA', 'lagB'].each { key ->
+        if (project.hasProperty(key)) {
+            systemProperty key, project.property(key).toString()
+        }
+    }
+    systemProperty 'devKit', project.hasProperty('noDevKit') ? 'false' : 'true'
+    systemProperty 'arenaDir', project.ext.realArenaDir.toString()
+    systemProperty 'relayControlSecret', project.ext.devRefereeSecret.call()
+    systemProperty 'relayControlPort', project.ext.devRefereePort.call().toString()
+    systemProperty 'noReferee', project.hasProperty('noReferee') ? 'true' : ''
+    maxHeapSize = (project.findProperty('devAssignHeap') ?: '4g').toString()
+}
+
+tasks.register('devRunBrokered') {
+    group = 'devenv'
+    description = 'Start the dev stack + relay + limbo + both edges in BROKER mode (matches come' +
+            ' from Redis). This one command backs all three configurations; which one you get is' +
+            ' decided by devAssign -Pmod.'
+    dependsOn 'devStackUp', 'devRun'
+    doLast {
+    }
+}
+
+tasks.named('devRun').configure {
+    mustRunAfter 'devStackUp'
+}
+

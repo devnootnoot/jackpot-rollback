@@ -1,0 +1,21 @@
+dependencies {
+    api project(':sim-core')
+
+    testImplementation project(':relay')
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.register('loadHarness', JavaExec) {
+    group = 'verification'
+    description = 'Run many concurrent matches through MatchDriver/NetSession over LoopbackNetwork and report tick percentiles, rollback/resim counts, allocation and retention.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.sim.host.load.LoadHarnessMain'
+    workingDir = projectDir
+    jvmArgs = ['-Xms2G', '-Xmx4G', '-XX:+UseG1GC', '-XX:MaxGCPauseMillis=50']
+    if (project.hasProperty('loadArgs')) {
+        args(project.property('loadArgs').toString().tokenize(' '))
+    }
+    outputs.upToDateWhen { false }
+}

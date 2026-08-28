@@ -1,0 +1,501 @@
+name: determinism
+
+# The sim has to produce bit-identical results on two players' machines and on a headless relay, which
+# in practice means different operating systems, different JDK vendors and different CPU architectures.
+# Running the same harness on each and comparing the per-tick checksum streams is the only check that
+# actually proves that. Every run uploads its whole stream, so a divergence found months from now can
+# still be bisected to the tick and to the part of the state that moved first.
+#
+# This workflow ends with a `gate` job that writes down, in the run summary, exactly which axes were
+# proven and which were not. Read that before trusting a green badge.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harness:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64
+            expect_os: Linux
+            expect_arch: amd64
+          - os: windows-latest
+            label: windows-x64
+            expect_os: Windows
+            expect_arch: amd64
+    runs-on: ${{ matrix.os }}
+    name: harness (${{ matrix.label }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: State which modules this job is about to cover
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "settings.gradle includes:"
+          grep '^include' settings.gradle
+          echo
+          echo "the root 'build' task below builds and tests all of them. A module added to"
+          echo "settings.gradle is covered from the moment it is added, with no edit to this file."
+
+      - name: Build and test every module in this repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "the mcleagues-core version fence is waived HERE ON PURPOSE with"
+          echo "-Drollback.versionFence=skip: this job has no mcleagues-core checkout. The"
+          echo "version_fence job owns that check, checks core out, and requires it."
+          echo
+          echo "setup-gradle restores this repository's build cache between runs, so a green"
+          echo "'build' used to be able to restore every test result and execute no test at all."
+          echo "Test tasks are now declared non-restorable, and verifyGatesRan prints per gate"
+          echo "whether it really ran in THIS invocation and fails the job if any of them did not."
+          echo "Read the 'what this build actually verified' block below before trusting the tick."
+          ./gradlew build verifyGatesRan -Drollback.versionFence=skip --no-daemon --console=plain
+
+      - name: Verify every jar this build produced embeds this sim-core
+        shell: bash
+        run: ./gradlew verifyEmbeddedSimVersion --no-daemon --console=plain
+
+      - name: Run the determinism harness
+        shell: bash
+        run: ./gradlew :sim-core:runHarness --no-daemon
+
+      - name: Confirm the stream really came from ${{ matrix.expect_os }}/${{ matrix.expect_arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          header="$(head -1 sim-core/build/harness/checksums-*.txt)"
+          echo "$header"
+          case "$header" in
+            *"os=${{ matrix.expect_os }}"*) ;;
+            *) echo "::error::expected an os=${{ matrix.expect_os }} stream, got: $header"; exit 1 ;;
+          esac
+          case "$header" in
+            *"arch=${{ matrix.expect_arch }}"*) ;;
+            *) echo "::error::expected arch=${{ matrix.expect_arch }}, got: $header"; exit 1 ;;
+          esac
+
+      - name: Record the entry-point coverage counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sim-core/build/harness
+          ./gradlew :sim-core:harnessCounts --no-daemon --console=plain \
+            | tee "sim-core/build/harness/entry-point-counts-${{ matrix.label }}.txt"
+
+      - name: Collect the harness output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-${{ matrix.label }}
+          path: sim-core/build/harness/
+          if-no-files-found: error
+
+  # NEEDS A RUNNER. Set the repository variable ARM64_RUNNER to an aarch64 runner label
+  # (GitHub-hosted "ubuntu-24.04-arm", or the label of a self-hosted arm64 box) and this job starts
+  # running; the cross-architecture job below then turns from skipped into a real gate. Until then
+  # nothing in this workflow proves that x64 and arm64 agree, and the gate job says so out loud.
+  harness_arm64:
+    if: ${{ vars.ARM64_RUNNER != '' }}
+    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-24.04-arm' }}
+    name: harness (linux-arm64, needs a runner)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Confirm the runner is really aarch64
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(uname -m)"
+          if [ "$actual" != "aarch64" ]; then
+            echo "::error::ARM64_RUNNER points at a $actual machine, so the cross-architecture gate would prove nothing"
+            exit 1
+          fi
+
+      - name: Build and test every module in this repository
+        shell: bash
+        run: ./gradlew build verifyGatesRan -Drollback.versionFence=skip --no-daemon --console=plain
+
+      - name: Run the determinism harness
+        shell: bash
+        run: ./gradlew :sim-core:runHarness --no-daemon
+
+      - name: Confirm the stream really came from Linux/aarch64
+        shell: bash
+        run: |
+          set -euo pipefail
+          header="$(head -1 sim-core/build/harness/checksums-*.txt)"
+          echo "$header"
+          case "$header" in
+            *"arch=aarch64"*) ;;
+            *) echo "::error::expected arch=aarch64, got: $header"; exit 1 ;;
+          esac
+
+      - name: Collect the harness output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-linux-arm64
+          path: sim-core/build/harness/
+          if-no-files-found: error
+
+  limbo_probe:
+    name: limbo serves every configured Minecraft version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Confirm every declared limbo capture is in this checkout
+        shell: bash
+        run: |
+          set -uo pipefail
+          ./gradlew devLimboConfig --no-daemon --console=plain 2>&1 | tee "$RUNNER_TEMP/limbo-config.log"
+          if grep -q 'NO LIMBO CAPTURE FOR' "$RUNNER_TEMP/limbo-config.log"; then
+            echo "::error::a Minecraft version the dev environment serves has no capture in this checkout. The capture .bin files ship with limbo.jar and have to be committed; regenerate one with 'gradlew devLimboCapture -PcaptureVersion=<version>'."
+            exit 1
+          fi
+          ls -l limbo/*.bin
+
+      - name: Prove a client of every version can log in, spawn and be transferred back out
+        shell: bash
+        run: ./gradlew devLimboProbe --no-daemon --console=plain
+
+  version_fence:
+    name: version fence (sim-core vs mcleagues-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Check mcleagues-core out so the fence has something to compare against
+        if: ${{ vars.MCLEAGUES_CORE_REPO != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MCLEAGUES_CORE_REPO }}
+          ref: ${{ vars.MCLEAGUES_CORE_REF || '' }}
+          token: ${{ secrets.MCLEAGUES_CORE_TOKEN || github.token }}
+          path: mcleagues-core
+
+      - name: Prove the fence still bites when mcleagues-core is missing
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "running VersionFenceTest against a checkout that does not exist. It has to FAIL."
+          echo "Before this workflow existed the same run passed, because the test skipped itself"
+          echo "whenever mcleagues-core was absent - which is every CI machine there has ever been."
+          if ./gradlew :sim-core:test --tests 'me.nootnoot.sim.net.VersionFenceTest' \
+              -Drollback.versionFence=require \
+              -Dmcleagues.core.dir="$RUNNER_TEMP/there-is-no-mcleagues-core-here" \
+              --no-daemon --console=plain; then
+            echo "::error::VersionFenceTest passed with no mcleagues-core in sight. The guard has gone back to evaporating and every fence result below is worthless."
+            exit 1
+          fi
+          echo "negative control OK: the fence fails when it cannot be compared."
+
+      - name: Compare the fence against mcleagues-core
+        if: ${{ vars.MCLEAGUES_CORE_REPO != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -n 'EXPECTED_VERSION' \
+            mcleagues-core/src/main/java/me/nootnoot/modules/practice/managers/RollbackModRegistry.java
+          ./gradlew :sim-core:test --tests 'me.nootnoot.sim.net.VersionFenceTest' \
+            -Drollback.versionFence=require \
+            -Dmcleagues.core.dir="$GITHUB_WORKSPACE/mcleagues-core" \
+            --no-daemon --console=plain
+          echo "mcleagues-core expects exactly the Protocol.VERSION this sim-core sends at Hello."
+          echo "This compares SOURCE only. mcleagues-core is not compiled here: it resolves"
+          echo "JackpotMCFramework and the Bookstore api out of a developer's local Maven"
+          echo "repository, which no hosted runner has."
+
+      - name: Say plainly that the fence was not compared
+        if: ${{ vars.MCLEAGUES_CORE_REPO == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::warning::the sim-core/mcleagues-core version fence was NOT compared in this run: the repository variable MCLEAGUES_CORE_REPO is not set, so there is no core checkout to read."
+          echo "Set MCLEAGUES_CORE_REPO (owner/name) and, for a private repo, the secret"
+          echo "MCLEAGUES_CORE_TOKEN. Until then the gate job below fails on purpose, because a"
+          echo "fence nobody checks is how core and sim-core drifted apart in the first place."
+
+  mod_jars:
+    name: mod jars embed this sim-core
+    if: ${{ vars.MOD_REPO != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: jackpot-rollback
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MOD_REPO }}
+          ref: ${{ vars.MOD_REF || '' }}
+          token: ${{ secrets.MOD_REPO_TOKEN || github.token }}
+          path: pvphq-rollback-mod
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            21
+            25
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build every stonecutter target
+        working-directory: pvphq-rollback-mod
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "the mod resolves sim-core from ../jackpot-rollback as a composite build, so the two"
+          echo "checkouts above have to sit side by side. This is the only place a mod jar and the"
+          echo "sim-core it nests are built from the same commit pair."
+          ./gradlew 1.21.11:build 26.1.2:build 26.2:build \
+            -Dorg.gradle.java.home="$JAVA_HOME" \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
+            --no-daemon --console=plain
+
+      - name: Verify each mod jar nests the sim-core this checkout compiles to
+        working-directory: pvphq-rollback-mod
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "No clearDevlibs step: each version build now deletes its own unremapped devlibs"
+          echo "jar as a finalizer of its mod jar task, once the remap that reads it has run. That"
+          echo "jar carries fabric.mod.json, so a client loads it and then dies on the first mapped"
+          echo "name, and the step below uploads this tree alongside the real jars. Running"
+          echo "verifyModJars on its own is therefore the stronger gate: it fails both on a stale"
+          echo "jar and on a devlibs jar the build failed to sweep."
+          ./gradlew verifyModJars \
+            -Dorg.gradle.java.home="$JAVA_HOME" \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
+            --no-daemon --console=plain
+
+      - name: Collect the mod jars
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-jars
+          path: pvphq-rollback-mod/versions/*/build/libs/*.jar
+          if-no-files-found: warn
+
+  cross_platform:
+    name: cross-platform
+    # Production edges are Linux containers and every digest recorded by hand so far came off Windows.
+    # A stream that differs between those two is a desync waiting to happen, and no single-runner test
+    # can see it. This job is the operating-system axis; the architecture axis is the job below.
+    needs: harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download every platform's checksum stream
+        uses: actions/download-artifact@v4
+        with:
+          pattern: harness-*
+          path: harness
+
+      - name: Compare the checksum streams
+        run: >
+          ./gradlew :sim-core:compareHarnessDigests
+          -PharnessDir=harness -PharnessMin=2 -PharnessPlatforms=2 -PharnessArches=1
+          --no-daemon --console=plain
+
+      - name: Keep the compared streams
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-all-platforms
+          path: harness/
+          if-no-files-found: error
+
+      - name: Say what this did and did not compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PROVEN: Linux and Windows produce the same per-tick checksum stream."
+          echo "NOT PROVEN HERE: both of those runners are x64. -PharnessArches=1 is what says so."
+          echo "The architecture axis is the cross_architecture job, and it is skipped."
+
+  cross_architecture:
+    name: cross-architecture
+    # SKIPPED UNTIL ARM64_RUNNER IS SET. This is the job that actually closes the architecture axis:
+    # java.lang.Math transcendentals are allowed to differ per platform and HotSpot swaps in
+    # architecture-specific intrinsics for them, so only an x64 run and an arm64 run agreeing tick for
+    # tick proves the JVM is doing what the sim assumes.
+    needs: [harness, harness_arm64]
+    if: ${{ vars.ARM64_RUNNER != '' && needs.harness_arm64.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download every architecture's checksum stream
+        uses: actions/download-artifact@v4
+        with:
+          pattern: harness-*
+          path: harness
+
+      - name: Compare the checksum streams across architectures
+        run: >
+          ./gradlew :sim-core:compareHarnessDigests
+          -PharnessDir=harness -PharnessMin=3 -PharnessPlatforms=2 -PharnessArches=2
+          --no-daemon --console=plain
+
+      - name: Keep the compared streams
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-all-architectures
+          path: harness/
+          if-no-files-found: error
+
+  gate:
+    name: what this run proves
+    needs: [harness, harness_arm64, limbo_probe, version_fence, mod_jars, cross_platform, cross_architecture]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      R_HARNESS: ${{ needs.harness.result }}
+      R_HARNESS_ARM64: ${{ needs.harness_arm64.result }}
+      R_LIMBO: ${{ needs.limbo_probe.result }}
+      R_FENCE: ${{ needs.version_fence.result }}
+      R_MOD: ${{ needs.mod_jars.result }}
+      R_CROSS_PLATFORM: ${{ needs.cross_platform.result }}
+      R_CROSS_ARCH: ${{ needs.cross_architecture.result }}
+      V_ARM64_RUNNER: ${{ vars.ARM64_RUNNER }}
+      V_CORE_REPO: ${{ vars.MCLEAGUES_CORE_REPO }}
+      V_MOD_REPO: ${{ vars.MOD_REPO }}
+      V_ALLOW_UNFENCED: ${{ vars.ALLOW_UNFENCED_CI }}
+    steps:
+      - name: Write down what is proven and what is not
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fence_state="NOT COMPARED"
+          if [ -n "$V_CORE_REPO" ]; then fence_state="$R_FENCE"; fi
+          mod_state="NOT BUILT HERE"
+          if [ -n "$V_MOD_REPO" ]; then mod_state="$R_MOD"; fi
+          arch_state="NOT PROVEN"
+          if [ -n "$V_ARM64_RUNNER" ]; then arch_state="$R_CROSS_ARCH"; fi
+
+          {
+            echo "## What this run proves"
+            echo
+            echo "| axis | state | what it rests on |"
+            echo "| --- | --- | --- |"
+            echo "| every module in this repo compiles and its tests pass | $R_HARNESS | root \`build\`: sim-core, sim-host, edge, relay, limbo, on linux-x64 and windows-x64 |"
+            echo "| those tests actually EXECUTED here, rather than being restored from the build cache | $R_HARNESS | \`verifyGatesRan\`: every gate stamps a per-invocation id when it really runs, and the build fails on a gate that left no stamp |"
+            echo "| the committed reference digest still matches | $R_HARNESS | \`checkHarnessDigest\`, wired into \`check\` |"
+            echo "| Linux and Windows agree tick for tick | $R_CROSS_PLATFORM | two full harness streams compared byte for byte |"
+            echo "| x64 and arm64 agree tick for tick | $arch_state | needs an aarch64 runner; set the repository variable ARM64_RUNNER |"
+            echo "| every jar built here embeds this sim-core | $R_HARNESS | \`verifyEmbeddedSimVersion\` over edge, relay, limbo, sim-core, sim-host |"
+            echo "| the limbo can actually serve every Minecraft version | $R_LIMBO | \`devLimboProbe\`: headless login, spawn and return-transfer per protocol |"
+            echo "| mcleagues-core expects the version this sim-core sends | $fence_state | \`VersionFenceTest\` against a real mcleagues-core checkout, plus a negative control proving the test fails when it cannot compare |"
+            echo "| the three mod jars embed this sim-core | $mod_state | \`verifyModJars\` after building all stonecutter targets against this checkout |"
+            echo
+            echo "### Not proven by a green badge on this workflow"
+            echo
+            echo "- **The architecture axis.** Both harness runners are x64. Math transcendentals may"
+            echo "  use architecture-specific intrinsics, so only an x64 run and an arm64 run agreeing"
+            echo "  closes Phase 3. Windows and Linux agreeing is real, and it is all that is claimed."
+            echo "- **mcleagues-core compiling.** Only its RollbackModRegistry source is read. Core"
+            echo "  resolves JackpotMCFramework and the Bookstore api from a developer's local Maven"
+            echo "  repository, so no hosted runner can build it."
+            echo "- **The mod at runtime.** Even when \`mod_jars\` runs it builds and fences the jars;"
+            echo "  no Minecraft client is launched anywhere in this workflow."
+            echo "- **A real two-client duel.** Nothing here plays a match."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if anything this workflow can actually reach is red
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+
+          for pair in "harness:$R_HARNESS" "limbo_probe:$R_LIMBO" "version_fence:$R_FENCE" \
+                      "cross_platform:$R_CROSS_PLATFORM"; do
+            job="${pair%%:*}"; result="${pair#*:}"
+            if [ "$result" != "success" ]; then
+              echo "::error::$job is $result"
+              bad=1
+            fi
+          done
+
+          for pair in "harness_arm64:$R_HARNESS_ARM64" "mod_jars:$R_MOD" \
+                      "cross_architecture:$R_CROSS_ARCH"; do
+            job="${pair%%:*}"; result="${pair#*:}"
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "::error::$job is $result"
+              bad=1
+            fi
+          done
+
+          if [ -z "$V_ARM64_RUNNER" ]; then
+            echo "::warning::the architecture axis is NOT proven by this run. No arm64 runner is configured, so harness_arm64 and cross_architecture were skipped. Phase 3 stays red until the repository variable ARM64_RUNNER points at an aarch64 machine."
+          fi
+
+          if [ -z "$V_MOD_REPO" ]; then
+            echo "::warning::the mod was not built in this run. The mod lives in a separate checkout (pvphq-rollback-mod, which resolves sim-core from ../jackpot-rollback as a composite build). Set the repository variable MOD_REPO to build it here and fence its jars; until then run 'gradlew verifyModJars' in that checkout by hand."
+          fi
+
+          if [ -z "$V_CORE_REPO" ] && [ "$V_ALLOW_UNFENCED" != "true" ]; then
+            echo "::error::the sim-core/mcleagues-core version fence was not compared in this run and no waiver is on file. Either set the repository variable MCLEAGUES_CORE_REPO (plus the secret MCLEAGUES_CORE_TOKEN for a private repo) so CI can read core's RollbackModRegistry, or set ALLOW_UNFENCED_CI=true to state in writing that this repository does not gate on the fence. A fence that silently skips is what let core and sim-core drift apart."
+            bad=1
+          fi
+
+          if [ "$bad" != "0" ]; then
+            exit 1
+          fi
+          echo "everything this workflow can reach is green. Read the run summary for what it does not reach."

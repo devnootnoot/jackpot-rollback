@@ -1,0 +1,46 @@
+// relay: the standalone, self-hosted UDP forwarder that pairs the two peers of a 1v1 match.
+// A DUMB forwarder — it inspects only Hello (for routing) and relays everything else verbatim.
+
+dependencies {
+    implementation project(':sim-core') // for the wire Protocol (Hello parsing only)
+
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.register('runRelay', JavaExec) {
+    group = 'application'
+    description = 'Run the UDP relay (arg: port, default 7777).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.nootnoot.relay.RelayServer'
+}
+
+// Self-contained runnable jar for Docker (the runner image is JRE-only and just `java -jar`s it).
+// Plain Jar task instead of the Shadow plugin to stay Gradle-version-agnostic.
+//
+// This configures the DEFAULT `jar` task rather than registering a second one. A separate fatJar task
+// emitting the same relay.jar filename meant `build` produced a thin, manifest-less jar and only an
+// explicit `fatJar` produced the runnable one — with whichever ran last winning. Deploying the loser
+// gives "no main manifest attribute, in relay.jar" in a container restart loop. Now the only jar this
+// project can produce is the runnable one.
+jar {
+    archiveFileName = 'relay.jar'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'me.nootnoot.relay.RelayServer'
+    }
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA',
+            'module-info.class', 'META-INF/versions/**/module-info.class'
+}
+
+// Kept so any existing deploy script calling :relay:fatJar still works; it now just builds `jar`.
+tasks.register('fatJar') {
+    group = 'build'
+    description = 'Alias for the default jar, which is already self-contained.'
+    dependsOn tasks.named('jar')
+}

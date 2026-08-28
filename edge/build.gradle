@@ -1,0 +1,25 @@
+repositories {
+    maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+    maven { url = 'https://repo.codemc.io/repository/maven-releases/' }
+}
+
+dependencies {
+    implementation project(':sim-host')
+    compileOnly "io.papermc.paper:paper-api:${project.paper_api_version}"
+    implementation 'com.github.retrooper:packetevents-spigot:2.13.0'
+    implementation 'redis.clients:jedis:7.0.0'
+    implementation 'com.google.code.gson:gson:2.13.2'
+
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+jar {
+    archiveFileName = 'jackpot-edge.jar'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}

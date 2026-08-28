@@ -1,0 +1,57 @@
+slot: 0
+session-id: 1
+relay-host: 127.0.0.1
+relay-port: 7777
+broker:
+  enabled: false
+  edge-id: ''
+  expected-arch: ''
+  region: ''
+  public-host: 127.0.0.1
+  public-port: 0
+  redis-host: 127.0.0.1
+  redis-port: 6379
+  redis-password: ''
+metrics:
+  enabled: true
+  bind: ''
+  port: 7788
+  sim-probe: true
+direct:
+  enabled: true
+  port: 7787
+  bind: ''
+  advertise-host: ''
+arena-file: arena.bin
+arena-handshake-timeout-ticks: 600
+rounds: 1
+cage:
+  drop-height: 15.0
+arena:
+  world: jackpot_arena
+  paste: true
+  blocks-per-tick: 16384
+  millis-per-tick: 30
+  refuse-on-clip: true
+ground-y: 64.0
+spawn:
+  x0: -4.0
+  y0: 64.0
+  z0: 0.0
+  x1: 4.0
+  y1: 64.0
+  z1: 0.0
+lock-arena-conditions: true
+attack-speed-repair: true
+dev-kit:
+  enabled: false
+movement:
+  enabled: true
+  per-tick-ceiling: 3.0
+  vertical-up-ceiling: 3.0
+  vertical-down-ceiling: 5.0
+  sustained-per-tick: 0.45
+  burst-credit-blocks: 4.0
+  correction-divergence: 2.0
+  correction-hold-ticks: 6
+  violation-threshold: 20
