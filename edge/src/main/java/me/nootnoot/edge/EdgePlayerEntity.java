@@ -46,6 +46,7 @@ public final class EdgePlayerEntity {
     private static final AtomicInteger ENTITY_ID_SEQ = new AtomicInteger();
 
     private static final int DATA_FLAGS = 0;
+    private static final int DATA_NO_GRAVITY = 5;
     private static final int DATA_POSE = 6;
     private static final int DATA_LIVING_FLAGS = 8;
     private static final int DATA_HEALTH = 9;
@@ -69,15 +70,24 @@ public final class EdgePlayerEntity {
     private static final float DEGREES_TO_BYTE = 0.7111111f;
 
     private final Player viewer;
-    private static final double RELATIVE_MOVE_LIMIT = 7.5;
-    private static final double MOVE_EPSILON_SQ = 7.6293945E-6;
 
-    private static final int RESYNC_INTERVAL_TICKS = 100;
 
     private final int entityId;
     private final UUID uuid;
     private final UserProfile profile;
     private final Map<EquipmentSlot, ItemStack> equipment = new EnumMap<>(EquipmentSlot.class);
+
+    private static final double RELATIVE_MOVE_LIMIT = 7.5;
+
+    private static final double MOVE_EPSILON_SQ = 7.6293945E-6;
+
+    private static final int RESYNC_INTERVAL_TICKS = 100;
+
+    private double sentX;
+    private double sentY;
+    private double sentZ;
+    private boolean sentPosition;
+    private int sinceResync;
 
     private boolean spawned;
     private boolean sneaking;
@@ -93,13 +103,6 @@ public final class EdgePlayerEntity {
     private boolean poseDirty;
     private boolean livingFlagsDirty;
     private int lastHeadYawByte = Integer.MIN_VALUE;
-    private double sentX;
-    private double sentY;
-    private double sentZ;
-    private boolean sentPosition;
-    private int sinceResync;
-    private boolean sentGround;
-    private boolean sentGroundKnown;
 
     public EdgePlayerEntity(Player viewer, int entityId, UUID uuid, String name,
                             String skinValue, String skinSignature) {
@@ -183,8 +186,9 @@ public final class EdgePlayerEntity {
         send(new WrapperPlayServerSpawnEntity(entityId, Optional.of(uuid), EntityTypes.PLAYER,
                 new Vector3d(x, y, z), pitch, yaw, yaw, 0, Optional.empty()));
 
-        List<EntityData<?>> data = new ArrayList<>(3);
+        List<EntityData<?>> data = new ArrayList<>(4);
         data.add(new EntityData<Byte>(DATA_FLAGS, EntityDataTypes.BYTE, flags()));
+        data.add(new EntityData<Boolean>(DATA_NO_GRAVITY, EntityDataTypes.BOOLEAN, Boolean.TRUE));
         data.add(new EntityData<EntityPose>(DATA_POSE, EntityDataTypes.ENTITY_POSE, pose));
         data.add(new EntityData<Byte>(DATA_SKIN_LAYERS, EntityDataTypes.BYTE, ALL_SKIN_LAYERS));
         send(new WrapperPlayServerEntityMetadata(entityId, data));
@@ -205,14 +209,9 @@ public final class EdgePlayerEntity {
         double dx = x - sentX;
         double dy = y - sentY;
         double dz = z - sentZ;
-        boolean groundFlipped = !sentGroundKnown || sentGround != onGround;
-        if (sentPosition && !groundFlipped
-                && dx * dx + dy * dy + dz * dz < MOVE_EPSILON_SQ) {
-            sendHeadYaw(yaw, false);
-            flushMetadata();
-            return;
-        }
-        boolean encodable = sentPosition
+        boolean idle = sentPosition && dx * dx + dy * dy + dz * dz < MOVE_EPSILON_SQ;
+        boolean encodable = !idle
+                && sentPosition
                 && Math.abs(dx) < RELATIVE_MOVE_LIMIT
                 && Math.abs(dy) < RELATIVE_MOVE_LIMIT
                 && Math.abs(dz) < RELATIVE_MOVE_LIMIT
@@ -229,8 +228,6 @@ public final class EdgePlayerEntity {
         sentY = y;
         sentZ = z;
         sentPosition = true;
-        sentGround = onGround;
-        sentGroundKnown = true;
         sendHeadYaw(yaw, false);
         flushMetadata();
     }
@@ -419,7 +416,6 @@ public final class EdgePlayerEntity {
         }
         spawned = false;
         sentPosition = false;
-        sentGroundKnown = false;
         flagsDirty = false;
         poseDirty = false;
         livingFlagsDirty = false;

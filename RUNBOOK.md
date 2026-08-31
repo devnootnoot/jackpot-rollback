@@ -49,10 +49,10 @@ without leaving the log line:
 
 ```
 inputBytes / checksumRev / protocolVersion
-     67    /     172     /      17324
+     67    /     184     /      17336
 ```
 
-`protocolVersion = (InputCodec.BYTES << 8) | (CHECKSUM_REV & 0xFF)`, so 67 * 256 + 172 = 17324.
+`protocolVersion = (InputCodec.BYTES << 8) | (CHECKSUM_REV & 0xFF)`, so 67 * 256 + 184 = 17336.
 Core's expected mod version (`RollbackModRegistry.EXPECTED_VERSION`) is the same number.
 
 **Do not compare a running fleet against the triple printed above.** It is what this checkout builds,

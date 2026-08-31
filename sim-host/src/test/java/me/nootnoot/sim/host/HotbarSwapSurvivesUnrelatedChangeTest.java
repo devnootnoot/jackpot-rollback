@@ -133,8 +133,17 @@ final class HotbarSwapSurvivesUnrelatedChangeTest {
         }
 
         plan.plan(confirmed, head, landing);
-        assertFalse(plan.predicted(STORAGE_SLOT), "confirmed reached the landing frame; the slot is free");
-        assertEquals(0, plan.ownedCells(landing));
+        assertTrue(plan.predicted(STORAGE_SLOT),
+                "a state whose tick is N has simulated frames 0..N-1, because Simulation.tick"
+                        + " increments at the END. So an input landing at frame N first appears in"
+                        + " a state with tick N+1. Releasing at tick == landing repaints from a"
+                        + " confirmed state that does not hold the change yet - traced live: the"
+                        + " slot showed the NEW item, then the OLD one for exactly one tick, then"
+                        + " the new one again");
+
+        plan.plan(confirmed, head, landing + 1);
+        assertFalse(plan.predicted(STORAGE_SLOT), "one tick later confirmed really has it");
+        assertEquals(0, plan.ownedCells(landing + 1));
     }
 
     @Test

@@ -234,6 +234,7 @@ public final class EdgePlugin extends JavaPlugin implements Listener {
         arenaFileName = getConfig().getString("arena-file", "arena.bin");
         arenaHandshakeTimeoutTicks = getConfig().getInt("arena-handshake-timeout-ticks", 600);
         localRounds = Math.max(1, getConfig().getInt("rounds", 1));
+        EdgeTrace.configure(envOrConfigBoolean("EDGE_TRACE", "dev.trace", false), getLogger());
         localLagMs = LaggedTransport.clamp(envOrConfigInt("EDGE_SIMULATED_LAG_MS",
                 "dev.simulated-lag-ms", 0));
         cageDropHeight = Math.max(0.0, Math.min(MAX_CAGE_DROP_HEIGHT,

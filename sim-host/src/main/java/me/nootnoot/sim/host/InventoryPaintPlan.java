@@ -173,7 +173,7 @@ public final class InventoryPaintPlan {
         if (until == NO_FRAME) {
             return false;
         }
-        if (confirmedTick - until >= 0) {
+        if (confirmedTick - until > 0) {
             ownedUntil[cell] = NO_FRAME;
             return false;
         }

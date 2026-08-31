@@ -25,7 +25,7 @@ stacks already exist and only covers moving them from one build to the next.
 ```
 Protocol.VERSION = (InputCodec.BYTES << 8) | (Protocol.CHECKSUM_REV & 0xFF)
                  =  170 165
-                 = 17324
+                 = 17336
 ```
 
 Three artifacts carry a copy of that fence, and every one of them is compiled from `sim-core`
@@ -715,11 +715,11 @@ Not the one printed below. **The one the running processes print.**
 
 ```
 [ ] every edge logs at startup:
-        Version fence on this build: inputBytes=67 checksumRev=171 protocolVersion=17324
+        Version fence on this build: inputBytes=67 checksumRev=171 protocolVersion=17336
 [ ] every edge prints the SAME triple as every other edge
 [ ] /rollbackmetrics on core reports  rollback_fleet_version_fences == 1
-[ ] /rollbackmetrics on core reports  core expects mod version 17324
-[ ] the mod jar being published computes to the same 17324
+[ ] /rollbackmetrics on core reports  core expects mod version 17336
+[ ] the mod jar being published computes to the same 17336
         Protocol.VERSION = (InputCodec.BYTES << 8) | (CHECKSUM_REV & 0xFF) = 67*256 + 171
 ```
 

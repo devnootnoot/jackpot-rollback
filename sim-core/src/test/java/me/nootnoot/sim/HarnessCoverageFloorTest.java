@@ -200,6 +200,7 @@ class HarnessCoverageFloorTest {
             "authority-stamp-clipped",
             "authority-stamp-too-far",
             "authority-stamp-unowned",
+            "authority-stamp-impulse-held",
             "melee-claim-refused-inside-min-reach",
             "blast-cell-budget-exhausted",
             "item-entity-refused",

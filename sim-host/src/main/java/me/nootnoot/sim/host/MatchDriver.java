@@ -41,7 +41,8 @@ public final class MatchDriver {
     private int dbgTick;
     private final MatchStats stats = new MatchStats();
     private final Arena arena;
-    private final double[] corrScratch = new double[3]; // reused drain buffer for the local rollback correction
+    private final double[] corrScratch = new double[3];
+    private final double[] peerCorrScratch = new double[3]; // reused drain buffer for the local rollback correction
 
     public MatchDriver(Transport transport, int slot, Arena arena, GameState initial,
                        int ringCapacity, InputSource input, SimRenderer renderer) {
@@ -84,6 +85,7 @@ public final class MatchDriver {
         // Hand the renderer this tick's local rollback correction so it can ease the camera across a
         // re-simulated knockback instead of letting setPosition snap to the corrected head.
         session.drainLocalCorrection(corrScratch);
+        session.drainPeerCorrection(peerCorrScratch);
         List<CombatEvent> confirmedEvents = session.drainConfirmedEvents();
         GameState confirmed = session.confirmedState();
         GameState headState = session.state();
@@ -91,6 +93,8 @@ public final class MatchDriver {
         try {
             renderer.beginCatchUp(catchUpFrames);
             renderer.feedLocalCorrection(corrScratch[0], corrScratch[1], corrScratch[2]);
+            renderer.feedPeerCorrection(peerCorrScratch[0], peerCorrScratch[1],
+                    peerCorrScratch[2]);
             renderer.render(headState, confirmed);
             renderer.playLocalHits(headState.events, headState, session.head());
             renderer.playEvents(confirmedEvents, confirmed);

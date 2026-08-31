@@ -125,6 +125,7 @@ public final class PlayerState {
 
     public float fallDistance;
     public int authoritySuspendTicks;
+    public int impulseHoldTicks;
     public double impulseVx;
     public double impulseVy;
     public double impulseVz;
@@ -287,6 +288,7 @@ public final class PlayerState {
         p.pearls = pearls;
         p.fallDistance = fallDistance;
         p.authoritySuspendTicks = authoritySuspendTicks;
+        p.impulseHoldTicks = impulseHoldTicks;
         p.impulseVx = impulseVx;
         p.impulseVy = impulseVy;
         p.impulseVz = impulseVz;

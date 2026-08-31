@@ -79,8 +79,8 @@ prints a `NOT INSTALLABLE` line, which now means an interrupted build left one b
 **The three mod jars in the tree are behind the source, and `verifyModJars` will not say so.** This
 was checked rather than assumed. The `sim-core` nested inside
 `versions/1.21.11/build/libs/pvphq-mod-1.21.11.jar` reports `CHECKSUM_REV = 171` and
-`VERSION = 17324`, which is exactly what the tree compiles to - so all three jars pass the fence and
-`verifyModJars` prints `VERSION 17324 OK` six times **before** you build anything. That is not proof
+`VERSION = 17336`, which is exactly what the tree compiles to - so all three jars pass the fence and
+`verifyModJars` prints `VERSION 17336 OK` six times **before** you build anything. That is not proof
 they are current. `verifyModJars` compares one number, the protocol fence, and the fence only moves
 when simulated behaviour or the checksum function does. Two source changes have landed since these
 jars were built and neither moved it:
@@ -325,7 +325,7 @@ sight.** If the client never sent the mod's hello channel, the edge refuses the 
 tells you to install the mod or drop `-Pmod` for that slot - which is what an unloaded Fabric mod
 looks like, not a netcode fault. And if the mod IS loaded but is a different build, the edge prints a
 `[mod-handoff] refusing the MOD-hosted slot` block naming **both** fence triples, the client's and the
-edge's. Both should read `67 / 171 / 17324` on this tree; if the client's differs, you are running a
+edge's. Both should read `67 / 171 / 17336` on this tree; if the client's differs, you are running a
 jar from some older tree, so rebuild, reinstall on both clients and push the assignment again. Note
 what this block does **not** catch: a jar built from this tree before its last source change carries
 the right triple and is waved straight through, which is why *Before anything* tells you to build

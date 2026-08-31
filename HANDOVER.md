@@ -14,8 +14,8 @@ next to it, and run the command.
 | --- | --- | --- |
 | tests | **0 failures across five gates.** Read the count itself off the build's own verdict block, never off this page - it moved three times on 2026-08-26 alone | `gradlew --stop` then `gradlew clean build --no-build-cache` |
 | determinism gate | **current.** `reference-digest.txt` is recorded at `checksum-rev=165` with `final-checksum=98b78a5d0629ac15`, `stream-digest=218bc25a4228a544`, `rollback-digest=9b7a69a1f8f87dba`, `arena-hash=fe21a2f81e31bc99`. Nothing to re-record | `gradlew :sim-core:checkHarnessDigest` |
-| version fence | **all four agree.** Source, `mcleagues-core`, `RUNBOOK.md` and the three built mod jars all read **67 / 171 / 17324** - the jars re-read out of their nested `sim-core`, not inferred | `Protocol.java`, `verifyEmbeddedSimVersion`, `verifyRollbackFence`, `verifyModJars` |
-| mod jars vs source | **current.** All three targets and their three jar-in-jar staging copies were rebuilt from this tree after `RollbackController.RESIM_FRAMES_PER_ADVANCE` moved 64 -> 24 and after the `Containers.decodePeerStack` window landed, and re-verified at 67 / 171 / 17324. Rebuild again after any further sim change | `gradlew 1.21.11:build 26.1.2:build 26.2:build`, then `gradlew verifyModJars` |
+| version fence | **all four agree.** Source, `mcleagues-core`, `RUNBOOK.md` and the three built mod jars all read **67 / 171 / 17336** - the jars re-read out of their nested `sim-core`, not inferred | `Protocol.java`, `verifyEmbeddedSimVersion`, `verifyRollbackFence`, `verifyModJars` |
+| mod jars vs source | **current.** All three targets and their three jar-in-jar staging copies were rebuilt from this tree after `RollbackController.RESIM_FRAMES_PER_ADVANCE` moved 64 -> 24 and after the `Containers.decodePeerStack` window landed, and re-verified at 67 / 171 / 17336. Rebuild again after any further sim change | `gradlew 1.21.11:build 26.1.2:build 26.2:build`, then `gradlew verifyModJars` |
 | played by a human | **never. Not one match, not one round, not once.** | - |
 
 That last row governs every other row. Every verdict in this document rests on tests and on reading
@@ -107,9 +107,9 @@ cd ../pvphq-rollback-mod && gradlew verifyModJars
 ```
 
 The three `:build` lines are the part that is not optional, and the reason is **not** the version
-fence any more. The jars in the tree embed 171 / 17324, read out of the nested `sim-core` inside
+fence any more. The jars in the tree embed 171 / 17336, read out of the nested `sim-core` inside
 `versions/1.21.11/build/libs/pvphq-mod-1.21.11.jar` rather than inferred, so `verifyModJars` prints
-`VERSION 17324 OK` six times on them before you build a thing. What it cannot see is that they were
+`VERSION 17336 OK` six times on them before you build a thing. What it cannot see is that they were
 built before this tree's last two source changes - the `RESIM_FRAMES_PER_ADVANCE` re-derivation in
 `sim-core` and the `Containers.decodePeerStack` window in the mod - neither of which moves the fence,
 because neither touches simulated state or the checksum function. Build the jars; do not read a
@@ -177,7 +177,7 @@ finding - either a simulated rule moved without the rev moving, or this machine 
 the amd64 run that recorded it, which is the open question in section 8 - and re-recording over it
 destroys the evidence.
 
-The three mod jars are no longer outstanding **on the fence**: they embed 171 / 17324, verified by
+The three mod jars are no longer outstanding **on the fence**: they embed 171 / 17336, verified by
 reading the nested `sim-core` out of the built jar rather than by inference, so all four artifacts
 agree. They are still outstanding on **content**. Both changes that landed after they were built -
 `RollbackController.RESIM_FRAMES_PER_ADVANCE` 64 -> 24 in `sim-core`, and the per-stack decode window
@@ -274,14 +274,14 @@ deliberately changing arena extraction, stop and find out why before anything el
 ### The version fence: three of the four artifacts agree, and the fourth is stale
 
 `InputCodec.BYTES` is 67 and `Protocol.CHECKSUM_REV` is 170, so `Protocol.VERSION` is ` 170`
-= **17324**.
+= **17336**.
 
 | artifact | how it was read | value |
 | --- | --- | --- |
-| jackpot-rollback | `Protocol.java` | 67 / 171 / 17324 |
+| jackpot-rollback | `Protocol.java` | 67 / 171 / 17336 |
 | mcleagues-core | `RollbackModRegistry.EXPECTED_VERSION`, gated by `gradlew verifyRollbackFence` | ` 170\| 170` |
-| RUNBOOK.md | `RunbookVersionFenceTest` reads it | 67 / 171 / 17324 |
-| **three mod jars + three jar-in-jar staging copies** | the nested `sim-core` unpacked out of each `pvphq-mod-<mc>.jar` and read directly with `javap` | 67 / 171 / 17324 - `verifyModJars` prints `VERSION 17324 OK` six times |
+| RUNBOOK.md | `RunbookVersionFenceTest` reads it | 67 / 171 / 17336 |
+| **three mod jars + three jar-in-jar staging copies** | the nested `sim-core` unpacked out of each `pvphq-mod-<mc>.jar` and read directly with `javap` | 67 / 171 / 17336 - `verifyModJars` prints `VERSION 17336 OK` six times |
 
 All four agree, and this time that was read rather than asserted: the previous two drafts of this
 table each got it wrong in opposite directions, one claiming agreement that did not exist and one
@@ -722,7 +722,7 @@ pass had answered it in two places with numbers that were themselves peer-author
 
 | row | what remains | why it is still open |
 | --- | --- | --- |
-| **the relay path authenticates a handshake, not a channel** | `UdpTransport` admits any well-formed datagram whose source address is the relay's, and `RelayServer.handle` forwards any well-formed datagram whose source address is a bound peer's. Only the `Hello` ever carried a slot token. This is the exact weakness `DirectLink` closed at CHECKSUM_REV 165, one path over | **open, and deliberately not closed hours before the two-client test.** The attack is off-path source forgery: spoof the relay's address and blast a client's ephemeral port with a `Finish` or an input burst (65k ports is cheap), or spoof a bound peer's address at the relay and have the forgery forwarded AND teed into the referee. `connect()` on the client socket and the `peers` map at the relay are address filters, and an address is the one field an off-path attacker forges for free. The fix is `LinkFrame` on this path too, but it cannot be the direct path's fix verbatim: the two clients share no secret (slot tokens are per-slot), so the keyed channel is client-to-RELAY, keyed by that slot's token, with the relay verifying on ingress and RE-FRAMING on egress under the destination's token, its own per-destination counter and a 64-frame replay window, and `RefereeManager.tee` fed the unframed body. The relay holds both tokens in every deployment that authenticates at all (derived from `RELAY_SLOT_SECRET`, held by `RefereeManager` for an authorized session, or pinned on first use); the fully open relay has no key and must stay unframed. Once framed, the raw token no longer needs to travel in the `Hello` on a keyed session, which makes this path as strong as the direct one rather than merely closer. What makes it a deliberate hold and not an oversight: `Protocol.VERSION` is `(InputCodec.BYTES << 8) | CHECKSUM_REV`, so the only knob that fences a framing break is `CHECKSUM_REV`. Landing it means 165 -> 170, `EXPECTED_VERSION` 17324, the fence triple in `RUNBOOK.md`, `DEPLOY.md` and `TESTPLAN.md`, a re-recorded harness digest, and a lockstep redeploy of six mod jars, `jackpot-edge.jar`, `relay.jar` and `mcleagues.jar` - a total-failure blast radius (no duel starts at all if one byte is wrong) on the one path both test configurations use. It also rewrites roughly fifteen relay tests that build a `UdpTransport` with no token at all (`RelayUdpTest`, `RefereeIntegrationTest`, `UdpTransportInboxIsByteBoundedTest`), which is where a mistake would actually be caught. Land it as its own change, with its own build and its own soak |
+| **the relay path authenticates a handshake, not a channel** | `UdpTransport` admits any well-formed datagram whose source address is the relay's, and `RelayServer.handle` forwards any well-formed datagram whose source address is a bound peer's. Only the `Hello` ever carried a slot token. This is the exact weakness `DirectLink` closed at CHECKSUM_REV 165, one path over | **open, and deliberately not closed hours before the two-client test.** The attack is off-path source forgery: spoof the relay's address and blast a client's ephemeral port with a `Finish` or an input burst (65k ports is cheap), or spoof a bound peer's address at the relay and have the forgery forwarded AND teed into the referee. `connect()` on the client socket and the `peers` map at the relay are address filters, and an address is the one field an off-path attacker forges for free. The fix is `LinkFrame` on this path too, but it cannot be the direct path's fix verbatim: the two clients share no secret (slot tokens are per-slot), so the keyed channel is client-to-RELAY, keyed by that slot's token, with the relay verifying on ingress and RE-FRAMING on egress under the destination's token, its own per-destination counter and a 64-frame replay window, and `RefereeManager.tee` fed the unframed body. The relay holds both tokens in every deployment that authenticates at all (derived from `RELAY_SLOT_SECRET`, held by `RefereeManager` for an authorized session, or pinned on first use); the fully open relay has no key and must stay unframed. Once framed, the raw token no longer needs to travel in the `Hello` on a keyed session, which makes this path as strong as the direct one rather than merely closer. What makes it a deliberate hold and not an oversight: `Protocol.VERSION` is `(InputCodec.BYTES << 8) | CHECKSUM_REV`, so the only knob that fences a framing break is `CHECKSUM_REV`. Landing it means 165 -> 170, `EXPECTED_VERSION` 17336, the fence triple in `RUNBOOK.md`, `DEPLOY.md` and `TESTPLAN.md`, a re-recorded harness digest, and a lockstep redeploy of six mod jars, `jackpot-edge.jar`, `relay.jar` and `mcleagues.jar` - a total-failure blast radius (no duel starts at all if one byte is wrong) on the one path both test configurations use. It also rewrites roughly fifteen relay tests that build a `UdpTransport` with no token at all (`RelayUdpTest`, `RefereeIntegrationTest`, `UdpTransportInboxIsByteBoundedTest`), which is where a mistake would actually be caught. Land it as its own change, with its own build and its own soak |
 | **GUI inventory ops on a moving frame** | nothing checks that a frame carrying a GUI inventory verb looks like a frame a GUI was open on. This is the shape of auto-totem and auto-armour | **the largest open item, and still open. Re-examined again at CHECKSUM_REV 165 and deliberately left open, with two concrete false-positive producers named rather than suspected: `InventoryIntents.chestEquip` emits `INV_MOVE` from a right-click with NO screen open and the player possibly sprinting, on BOTH hosts, so the whole `guiOnlyInvAction` set cannot be gated on `screenQuietFrame`; and the edge's `invQueue` drains one intent per tick, so a burst of honest clicks can spill onto the frame after the screen closed and the keys came back. A refusal written on today's predicate would eat both.** A receive-side refusal needs a matching producer-side HOLD on both hosts, and the edge's queue is fed by an unmodded client that can legitimately click a slot and be running the next tick. The clean design is a one-slot pending-op field in `PlayerState`, drained on the first frame that passes the gate, but that is replicated sim state and a visible meta change that wants owner sign-off. Two predicates now measure it rather than one: `inv-op-on-a-moving-frame` counts GUI-only verbs on frames that fail `HostFrameContract.screenQuietFrame` (274 in the scripted scenario - movement keys included, which is why it is too wide to refuse on), and `inv-op-on-a-combat-frame`, added at 165, counts the narrower and unambiguous case: a real container or inventory verb on a frame that ALSO claims a melee hit, a crystal hit or a block action (110 in the scripted scenario). The second is the one a refusal should eventually be written against, because a latched movement key can survive a screen opening but a left click cannot be spent in two places. Still measured, still not refused |
 | abort to no-contest | a losing client can send `Message.Abort`, or a deliberately wrong `Message.Checksum`, and turn a loss into a no-contest | inherent, and narrowed rather than closed. A genuine desync MUST be a no-contest, so the two are indistinguishable by construction. What WAS closed at CHECKSUM_REV 163: the announcement no longer favours the announcer. Receiving `Abort(ABORT_DESYNC)` used to fall through to the generic peer-abort branch, which the edge files as `PEER_GONE` - the one cause a lone report is arbitrated INTO A WIN with - so a hostile client that forged a checksum and then made sure the victim's report went missing collected the match. It is now its own cause, `DESYNC_ANNOUNCED`, void from either side and on its own (`PeerChecksumIsAnAccusationTest`, `PeerDrivenNoContestTest`). A `Message.Checksum` for a frame past `localInputs.end()` is also refused outright and counted as `peerChecksumOverreach`: the sender provably could not have simulated a frame this side has not produced an input for, and that was the only unbounded growth path into `pendingRemoteChecksums`. **Closed on the modded relay path at this refresh**, and only there: a decided referee verdict outranks a fabricated `DESYNC` (`RefereeArbiter` precedence rule 2, `RefereeArbiterTest`), so on a mod duel through a relay with a control secret the forged no-contest no longer pays. It still pays on every path the referee does not watch - direct edge-to-edge links, edge-vs-edge relay sessions, and any relay started without `RELAY_CONTROL_SECRET`, which no longer includes the dev stack. Cross-play is no longer on that list: `RollbackHandoffManager.finishCrossPlayHandoff` now authorizes the session with the same `AUTHORIZE_SETUP` control message the mod path uses (the cross-play arena blob is already `encodeForSim`, so the relay can rebuild it), `resolveResult` hands the mod's report to `EdgeSessionBroker` without wiping the verdict state, and `EdgeSessionBroker.evaluate` runs the same `RefereeArbiter` the mod path runs. Edge-vs-edge over a relay is the one line left: `completeEdgeHandoff` never calls `authorizeReferee`. The cheap complement is still worth having: a policy counter in mcleagues on unexplained no-contests per account |
 | aim, and melee kill-aura within reach | yaw and pitch are whatever the client says, and `ClaimAuthority.meleeClaim` does not raycast the CROSSHAIR | **narrowed at CHECKSUM_REV 165, still open for aim itself.** What is now REFUSED: `ClaimAuthority.aimAhead` throws out a claim when every candidate hull in reach lies more than 120 degrees off the frame's own look vector, measured from each candidate eye in the rewind window. That is the case the old note did not cover - a client setting `meleeHit` on a frame whose own yaw puts the victim squarely behind it - and the project's own determinism scenario was granting exactly that 199 times in a row, from tick 2522, with the victim pinned at x=-0.08 behind an attacker at x=0.50 looking at +x. Interpenetrating hulls are exempt: at 0.58 blocks apart which side of a 0.6-wide box someone is on is sub-block noise, and a claimant already inside their opponent gains nothing from the exemption. 120 degrees rather than a crosshair test because a human cannot rotate that far inside one 50 ms tick - it needs 2400 deg/s - so no flick, spin-click or jump crit is refused, and because the three old arguments against a CROSSHAIR gate all still hold: the claim carries no aim (`meleeHit` is one bit), vanilla's own `ServerGamePacketListenerImpl` gates on distance alone, and `McInputSource` raycasts the RENDERED opponent box which trails the sim head, so on a bad link the box the client tested is not in the candidate set and a crosshair gate would refuse the laggy honest hits. What is still TRUSTED: the yaw itself. A kill-aura that snaps yaw onto the target passes `aimAhead` exactly as it passes vanilla, and that is irreducible - the client decides where it aims. It is measured rather than refused: `PlayerState.meleeClaimsGranted` and `meleeClaimsOffAim` are per-slot, replicated, checksummed and survive a round reset, so the ratio is identical on both clients and on the relay referee and a disagreement about it IS a desync; `ClaimAuthority.offAimRateExceeds` is the predicate a policy layer reads and NOTHING reads it yet. The scripted scenario produces 188 off-aim grants against 827, which is how large the honest population of jump crits and mid-turn hits is. `ClaimMarginTest` owns the decision (both the refusal and the interpenetration exemption), `MeleeAimIsMeasuredNotGatedTest` pins that the CROSSHAIR still may not decide, `MeleeOffAimIsAReplicatedRateTest` pins the ledger |
@@ -815,7 +815,7 @@ their build fence and both reached `edge ready:` and reported `inputBytes=67 che
 protocolVersion=17315`. **That boot was at CHECKSUM_REV 163 and has not been repeated since**, so the
 triple in it is two revisions old and is evidence that the fence PRINTS and that the edges start, not
 evidence of today's number - re-run `devVerifyEdgeBoot` if you want the current one, and expect
-`checksumRev=171 protocolVersion=17324`. Nothing else was brought up on that run - no Redis, no
+`checksumRev=171 protocolVersion=17336`. Nothing else was brought up on that run - no Redis, no
 Mongo, no relay, no limbo, no assignment - so defects 2 and 3 below and everything in *How far the
 live run got* remain one session's report. What was re-checked by reading rather than running:
 `EdgeBuildFenceRemapTest`, `SlotTokens.derive`, the two metrics ports in `devenv.gradle` and the four
@@ -849,7 +849,7 @@ in DERIVED mode, both Paper edges reaching `edge ready:`, one assignment pushed,
 their half of ONE session id, both loading the same arena key and printing the same
 `hash=0xe75b5c4698e28cc8`, both per-slot HMAC tokens independently recomputed and matched, and all three
 running services reporting 67/160/17312 off their own `/metrics` - which was the correct fence at that
-moment and is now 67/166/17324, so re-run it rather than comparing against those digits. Then both edges
+moment and is now 67/166/17336, so re-run it rather than comparing against those digits. Then both edges
 logged `waiting for <name> to join THIS edge`, which is the correct and only possible state with nobody
 connected.
 
@@ -884,7 +884,7 @@ cd ../pvphq-rollback-mod && gradlew 1.21.11:build 26.1.2:build 26.2:build verify
 There is no `updateHarnessDigest` line here any more, because the reference is current. Run it, ALONE
 and never chained with `build`, only when you have deliberately changed simulated behaviour and the gate
 says so in its own words; section 7 has the reason it cannot be chained. If `verifyModJars` does not
-report `VERSION 17324 OK` six times, stop. Every match will abort at HELLO and the client will tell you
+report `VERSION 17336 OK` six times, stop. Every match will abort at HELLO and the client will tell you
 nothing useful about why. If it does report six, that means the jars would shake hands - it does not
 mean they were built from this tree, so run the `:build` line regardless of what the check says.
 
@@ -1060,7 +1060,7 @@ non-zero baseline to alert against.
 mod, edge, relay and core ship in lockstep and an old jar aborts every match with
 `ABORT_VERSION_MISMATCH`. `rollback.edge.enabled` in core is the kill switch, and it is now actually
 present in `config.yml`. DEPLOY.md carries the staged plan with per-stage abort criteria. None of it has
-been executed. The wire fence is 17324, and `mcleagues.jar`, `relay.jar` and all three mod jars deploy
+been executed. The wire fence is 17336, and `mcleagues.jar`, `relay.jar` and all three mod jars deploy
 LOCKSTEP at that number. Every artifact in the tree has been rebuilt to it and `verifyModJars` agrees,
 so for the first time the tree has a shippable set - which is a precondition of phase 8, not the phase.
 
@@ -1271,11 +1271,11 @@ and `CachedTestsDeclareWhatTheyFenceTest` asserts that nobody switches it off wh
 key bug. Test results are the exception and are now never restored at all. Section 6A is why, and it is
 worth reading before you trust any green run.
 
-**Three: a jar that is not what you think it is.** Four things must carry 17324 simultaneously: the mod
+**Three: a jar that is not what you think it is.** Four things must carry 17336 simultaneously: the mod
 jar on each client, the edge plugin, the relay, and core's `RollbackModRegistry`. A skew aborts every
 match at HELLO, and what the player sees is a duel that refuses to start. All four agree today, which is
 the table in section 0; they stop agreeing the moment the rev moves and one half of the rebuild is
-skipped. The subtler shape, and the one the tree is in right now, is a jar that agrees on 17324 and
+skipped. The subtler shape, and the one the tree is in right now, is a jar that agrees on 17336 and
 is still not this tree's: a change that touches no simulated rule and no wire format leaves the fence
 where it was, so the check passes and the jar is a build behind. The fence is a divergence test, not
 a freshness test, and there is nothing in the build that tests freshness.
@@ -1558,7 +1558,7 @@ the jars predate two fence-neutral source changes and nothing in this build will
 ```
 cd jackpot-rollback      && gradlew --stop && gradlew clean build --no-build-cache    (expect 0 failures)
 cd ../pvphq-rollback-mod && gradlew 1.21.11:build 26.1.2:build 26.2:build
-cd ../pvphq-rollback-mod && gradlew verifyModJars                                     (expect VERSION 17324 OK, six times)
+cd ../pvphq-rollback-mod && gradlew verifyModJars                                     (expect VERSION 17336 OK, six times)
 ```
 
 Read the test count off the build's own `=== what this build actually verified ===` block rather than

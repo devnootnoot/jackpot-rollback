@@ -683,6 +683,10 @@ public final class NetSession {
         controller.drainLocalCorrection(out);
     }
 
+    public void drainPeerCorrection(double[] out) {
+        controller.drainPeerCorrection(out);
+    }
+
     public java.util.List<me.nootnoot.sim.state.CombatEvent> drainConfirmedEvents() {
         return controller.drainConfirmedEvents();
     }

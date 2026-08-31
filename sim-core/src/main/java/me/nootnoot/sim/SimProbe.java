@@ -99,7 +99,9 @@ public final class SimProbe {
 
     public static final int INV_OP_ON_A_COMBAT_FRAME = LEFT_CLICK_CLAIMED_TWO_TARGETS + 1;
 
-    public static final int COUNTERS = INV_OP_ON_A_COMBAT_FRAME + 1;
+    public static final int AUTHORITY_STAMP_IMPULSE_HELD = INV_OP_ON_A_COMBAT_FRAME + 1;
+
+    public static final int COUNTERS = AUTHORITY_STAMP_IMPULSE_HELD + 1;
 
     private static final String[] PROJECTILE_NAMES = {
             "arrow", "pearl", "snowball", "egg", "firework", "splash-potion", "xp-bottle",
@@ -194,6 +196,7 @@ public final class SimProbe {
         n[AUTHORITY_STAMP_CLIPPED] = "authority-stamp-clipped";
         n[AUTHORITY_STAMP_TOO_FAR] = "authority-stamp-too-far";
         n[AUTHORITY_STAMP_UNOWNED] = "authority-stamp-unowned";
+        n[AUTHORITY_STAMP_IMPULSE_HELD] = "authority-stamp-impulse-held";
         n[AUTHORITY_STAMP_SUSPENDED] = "authority-stamp-suspended";
         n[AUTHORITY_STAMP_HELD] = "authority-stamp-held";
         n[MELEE_CLAIM_REFUSED_BEHIND_THE_BACK] = "melee-claim-refused-behind-the-back";

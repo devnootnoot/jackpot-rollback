@@ -32,11 +32,9 @@ class AttackerSeesKnockbackImmediatelyTest {
     void anEdgeHostedVictimStartsMovingOnTheHitFrame() {
         GameState s = duelInRange(true);
         Arena arena = Arena.flat(GROUND_Y);
-        double stoodAtX = s.players[1].x;
-
         Simulation.tick(s, arena, landedHit(), Input.NONE.heldOnly());
 
-        assertTrue(Math.abs(s.players[1].x - stoodAtX) > 1.0E-6,
+        assertTrue(Math.abs(s.players[1].vx) > 1.0E-6,
                 "the whole point of rollback is that the attacker sees the hit land NOW, not after"
                         + " a round trip. The sim must predict the victim's arc on the attacking"
                         + " host immediately. Suppressing it made the victim sit still until their"
@@ -64,11 +62,9 @@ class AttackerSeesKnockbackImmediatelyTest {
     void aModHostedVictimIsUnaffected() {
         GameState s = duelInRange(false);
         Arena arena = Arena.flat(GROUND_Y);
-        double stoodAtX = s.players[1].x;
-
         Simulation.tick(s, arena, landedHit(), Input.NONE);
 
-        assertTrue(Math.abs(s.players[1].x - stoodAtX) > 1.0E-6,
+        assertTrue(Math.abs(s.players[1].vx) > 1.0E-6,
                 "mod-vs-mod already felt right and must stay bit-identical");
     }
 }

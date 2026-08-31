@@ -278,6 +278,7 @@ public final class Checksum {
         h = mixInt(h, p.pearls);
         h = mixFloat(h, p.fallDistance);
         h = mixInt(h, p.authoritySuspendTicks);
+        h = mixInt(h, p.impulseHoldTicks);
         h = mixDouble(h, p.impulseVx);
         h = mixDouble(h, p.impulseVy);
         h = mixDouble(h, p.impulseVz);

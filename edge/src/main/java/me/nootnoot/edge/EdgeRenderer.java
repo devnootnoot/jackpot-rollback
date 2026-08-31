@@ -43,11 +43,35 @@ public final class EdgeRenderer implements SimRenderer {
 
     public static final double HOLD_LEASH_BLOCKS = 0.75;
 
+    private static final int ARC_TRACE_TICKS = 16;
 
-    private final EdgePeerSmoother peerSmoother = new EdgePeerSmoother();
+    private static final double PEER_TRACE_BLOCKS = 0.4;
 
-    private static final boolean PEER_SMOOTHING = !"false".equalsIgnoreCase(
-            String.valueOf(System.getenv("EDGE_PEER_SMOOTHING")));
+    private static final double PEER_JERK_BLOCKS = 0.12;
+
+    private boolean jerkSeeded;
+    private double jerkPrevX;
+    private double jerkPrevY;
+    private double jerkPrevZ;
+    private double jerkPrevStepX;
+    private double jerkPrevStepY;
+    private double jerkPrevStepZ;
+
+    private final EdgePeerErrorAbsorber peerAbsorb = new EdgePeerErrorAbsorber();
+
+
+    private int tracedImpulseSeq = Integer.MIN_VALUE;
+    private int tracedArcTicks;
+    private double tracedX;
+    private double tracedY;
+    private double tracedZ;
+
+    private static String fmt(double v) {
+        return String.format(java.util.Locale.ROOT, "%.4f", v);
+    }
+
+
+
 
     private static final double CAGE_HOLD_MARGIN = 0.5;
     private static final double CAGE_HOLD_HEADROOM = 1.0;
@@ -127,7 +151,7 @@ public final class EdgeRenderer implements SimRenderer {
     private boolean identityDirty;
 
     private int prevHurtTime;
-    private int lastImpulseSeq;
+    private int highestImpulseSeq;
     private int prevOtherHurtTime;
     private int prevOtherAttackTicker;
     private int prevOtherHeldItemId;
@@ -224,7 +248,7 @@ public final class EdgeRenderer implements SimRenderer {
         if (opponent != null) {
             opponent.despawn();
         }
-        peerSmoother.reset();
+        peerAbsorb.reset();
         identityDirty = false;
         peer.reset();
         opponent = new EdgePlayerEntity(player, EdgePlayerEntity.nextEntityId(), profileUuid(),
@@ -279,6 +303,11 @@ public final class EdgeRenderer implements SimRenderer {
     }
 
     @Override
+    public void feedPeerCorrection(double dx, double dy, double dz) {
+        peerAbsorb.correction(dx, dy, dz);
+    }
+
+    @Override
     public void render(GameState head, GameState confirmed) {
         if (!player.isOnline()) {
             return;
@@ -292,14 +321,84 @@ public final class EdgeRenderer implements SimRenderer {
         }
 
         EdgePlayerEntity npc = ensureOpponent(other);
-        boolean peerJumped = head.roundResetCountdown > 0 || other.dead
-                || other.authoritySuspendTicks > 0 || !PEER_SMOOTHING;
-        peerSmoother.follow(other, peerJumped, System.nanoTime());
         fx.peerEntityId(npc.entityId());
         projectiles.peerEntityId(npc.entityId());
         drops.peerEntityId(npc.entityId());
         dig.peerEntityId(npc.entityId());
-        npc.move(peerSmoother.x(), peerSmoother.y(), peerSmoother.z(), other.yaw, other.pitch,
+        if (EdgeTrace.on()) {
+            if (other.impulseSeq != tracedImpulseSeq) {
+                tracedImpulseSeq = other.impulseSeq;
+                tracedArcTicks = ARC_TRACE_TICKS;
+                EdgeTrace.log("peer impulse seq=" + other.impulseSeq
+                        + " impulse=(" + fmt(other.impulseVx) + "," + fmt(other.impulseVy) + ","
+                        + fmt(other.impulseVz) + ")");
+            }
+            if (tracedArcTicks > 0) {
+                tracedArcTicks--;
+                EdgeTrace.log("peer arc t=" + (ARC_TRACE_TICKS - tracedArcTicks)
+                        + " pos=(" + fmt(other.x) + "," + fmt(other.y) + "," + fmt(other.z) + ")"
+                        + " step=(" + fmt(other.x - tracedX) + "," + fmt(other.y - tracedY) + ","
+                        + fmt(other.z - tracedZ) + ")"
+                        + " vel=(" + fmt(other.vx) + "," + fmt(other.vy) + "," + fmt(other.vz) + ")"
+                        + " ground=" + other.onGround + " hold=" + other.impulseHoldTicks
+                        + " headTick=" + head.tick);
+            }
+            tracedX = other.x;
+            tracedY = other.y;
+            tracedZ = other.z;
+        }
+        boolean peerJumped = head.roundResetCountdown > 0 || other.dead
+                || other.authoritySuspendTicks > 0;
+        peerAbsorb.follow(other, peerJumped);
+        if (EdgeTrace.on() && confirmed != null) {
+            PlayerState real = confirmed.players[1 - localSlot];
+            double px = peerAbsorb.x() - real.x;
+            double py = peerAbsorb.y() - real.y;
+            double pz = peerAbsorb.z() - real.z;
+            double off = Math.sqrt(px * px + py * py + pz * pz);
+            if (off > PEER_TRACE_BLOCKS) {
+                EdgeTrace.log("PEEROFF off=" + String.format(java.util.Locale.ROOT, "%.3f", off)
+                        + " shown=(" + String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f",
+                                peerAbsorb.x(), peerAbsorb.y(), peerAbsorb.z())
+                        + ") head=(" + String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f",
+                                other.x, other.y, other.z)
+                        + ") confirmed=(" + String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f",
+                                real.x, real.y, real.z)
+                        + ") absorbErr=" + String.format(java.util.Locale.ROOT, "%.3f",
+                                peerAbsorb.error())
+                        + " headGround=" + other.onGround + " hold=" + other.impulseHoldTicks
+                        + " headTick=" + head.tick + " confTick=" + confirmed.tick);
+            }
+        }
+        if (EdgeTrace.on()) {
+            double sx = peerAbsorb.x() - jerkPrevX;
+            double sy = peerAbsorb.y() - jerkPrevY;
+            double sz = peerAbsorb.z() - jerkPrevZ;
+            if (jerkSeeded) {
+                double jx = sx - jerkPrevStepX;
+                double jy = sy - jerkPrevStepY;
+                double jz = sz - jerkPrevStepZ;
+                double jerk = Math.sqrt(jx * jx + jy * jy + jz * jz);
+                if (jerk > PEER_JERK_BLOCKS) {
+                    EdgeTrace.log("PEERJERK jerk="
+                            + String.format(java.util.Locale.ROOT, "%.3f", jerk)
+                            + " step=(" + String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f",
+                                    sx, sy, sz)
+                            + ") prevStep=(" + String.format(java.util.Locale.ROOT,
+                                    "%.3f,%.3f,%.3f", jerkPrevStepX, jerkPrevStepY, jerkPrevStepZ)
+                            + ") headTick=" + head.tick + " confTick=" + confirmed.tick
+                            + " hold=" + other.impulseHoldTicks);
+                }
+            }
+            jerkPrevStepX = sx;
+            jerkPrevStepY = sy;
+            jerkPrevStepZ = sz;
+            jerkPrevX = peerAbsorb.x();
+            jerkPrevY = peerAbsorb.y();
+            jerkPrevZ = peerAbsorb.z();
+            jerkSeeded = true;
+        }
+        npc.move(peerAbsorb.x(), peerAbsorb.y(), peerAbsorb.z(), other.yaw, other.pitch,
                 other.onGround);
         npc.setState(other.sneaking, other.sprinting, other.swimming, other.gliding,
                 other.fireTicks > 0);
@@ -340,8 +439,12 @@ public final class EdgeRenderer implements SimRenderer {
         }
 
         boolean hurtEdge = mine.hurtTime > prevHurtTime;
-        if (mine.impulseSeq != 0 && mine.impulseSeq != lastImpulseSeq) {
-            lastImpulseSeq = mine.impulseSeq;
+        if (mine.impulseSeq != 0 && mine.impulseSeq - highestImpulseSeq > 0) {
+            highestImpulseSeq = mine.impulseSeq;
+            if (EdgeTrace.on()) {
+                EdgeTrace.log("SHOVE seq=" + mine.impulseSeq + " v=(" + mine.impulseVx + ","
+                        + mine.impulseVy + "," + mine.impulseVz + ") headTick=" + head.tick);
+            }
             player.setVelocity(new Vector(mine.impulseVx, mine.impulseVy, mine.impulseVz));
         }
         if (hurtEdge) {

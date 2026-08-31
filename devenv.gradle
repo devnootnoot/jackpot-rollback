@@ -307,6 +307,8 @@ tasks.register('devSetup') {
             boolean devKit = !project.hasProperty('noDevKit')
             cfg.append('dev-kit:').append(NL)
             cfg.append('  enabled: ').append(devKit).append(NL)
+            cfg.append('dev:').append(NL)
+            cfg.append('  trace: ').append(!project.hasProperty('noTrace')).append(NL)
             boolean brokered = project.hasProperty('broker')
                     || gradle.taskGraph.allTasks.any { it.name == 'devRunBrokered' }
             cfg.append('broker:').append(NL)

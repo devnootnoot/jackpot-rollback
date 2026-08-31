@@ -33,6 +33,8 @@ public final class EdgeMovementValidator {
 
     public static final int TELEPORT_GRACE_TICKS = 20;
     public static final int LAG_TICK_CLAMP = 4;
+
+    public static final int IMPULSE_HOLD_TICKS = 10;
     public static final long TICK_NANOS = 50_000_000L;
 
     public record Limits(boolean enabled,
@@ -88,6 +90,7 @@ public final class EdgeMovementValidator {
     private double impulseH;
     private double impulseUp;
     private int impulseSeq;
+    private int impulseHoldTicks;
 
     private double credit;
     private double climbCredit;
@@ -158,13 +161,19 @@ public final class EdgeMovementValidator {
         double simH = Math.sqrt(head.vx * head.vx + head.vz * head.vz);
         double horizontalReference = maxRecentEnvelopeH() + GROUND_ACCEL_PER_TICK * effectScale
                 + SPRINT_JUMP_BOOST + JITTER_TOLERANCE;
-        impulseH *= AIR_FRICTION;
+        if (impulseHoldTicks == 0) {
+            impulseH *= AIR_FRICTION;
+        }
         if (simH > horizontalReference) {
             impulseH = Math.max(impulseH, Math.min(simH, limits.perTickCeiling()));
         }
 
         double verticalReference = maxRecentEnvelopeUp() + JITTER_TOLERANCE;
-        impulseUp = Math.max(0.0, (impulseUp - GRAVITY) * VERTICAL_DRAG);
+        if (impulseHoldTicks > 0) {
+            impulseHoldTicks--;
+        } else {
+            impulseUp = Math.max(0.0, (impulseUp - GRAVITY) * VERTICAL_DRAG);
+        }
         if (head.vy > verticalReference) {
             impulseUp = Math.max(impulseUp, Math.min(head.vy, limits.verticalUpCeiling()));
         }
@@ -178,6 +187,7 @@ public final class EdgeMovementValidator {
                     Math.min(head.impulseVy, limits.verticalUpCeiling()));
             credit = limits.burstCreditBlocks();
             climbCredit = CLIMB_CREDIT_BLOCKS;
+            impulseHoldTicks = IMPULSE_HOLD_TICKS;
         }
 
         double locomotionH = glide ? ELYTRA_GLIDE_PER_TICK : SPRINT_JUMP_PEAK_PER_TICK * effectScale;
@@ -278,6 +288,7 @@ public final class EdgeMovementValidator {
         recentEnvelopeUp2 = envelopeUp;
         impulseH = 0.0;
         impulseUp = 0.0;
+        impulseHoldTicks = 0;
         credit = limits.burstCreditBlocks();
         climbCredit = CLIMB_CREDIT_BLOCKS;
         return new Verdict(x, y, z, false, false, false, violations);

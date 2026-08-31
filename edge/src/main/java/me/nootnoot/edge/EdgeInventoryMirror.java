@@ -17,11 +17,20 @@ public final class EdgeInventoryMirror {
     private final int localSlot;
     private final InventoryPaintPlan plan = InventoryPaintPlan.forPlayer();
     private final boolean[] resync = new boolean[InventoryPaintPlan.PLAYER_CELLS];
+    private final boolean[] wasPredicted = new boolean[resync.length];
 
     public EdgeInventoryMirror(Player player, EdgeEntryStacks stacks, int localSlot) {
         this.player = player;
         this.stacks = stacks;
         this.localSlot = localSlot;
+    }
+
+    private static int entryOfState(PlayerState p, int slot) {
+        return p == null || p.slotEntry == null ? -1 : p.slotEntry[slot];
+    }
+
+    private static int countOfState(PlayerState p, int slot) {
+        return p == null || p.slotCount == null ? -1 : p.slotCount[slot];
     }
 
     public void apply(GameState head, GameState confirmed) {
@@ -40,8 +49,21 @@ public final class EdgeInventoryMirror {
         PlayerInventory inv = player.getInventory();
         boolean wrote = false;
         for (int slot = 0; slot < ItemDict.SLOTS; slot++) {
-            if (!takeResync(slot) && !plan.repaint(slot)) {
+            boolean forced = takeResync(slot);
+            if (!forced && !plan.repaint(slot)) {
                 continue;
+            }
+            if (EdgeTrace.on()) {
+                PlayerState src = plan.view(slot);
+                PlayerState h = head == null ? null : head.players[localSlot];
+                EdgeTrace.log("paint slot=" + slot
+                        + " from=" + (plan.predicted(slot) ? "HEAD" : "CONFIRMED")
+                        + " forcedResync=" + forced
+                        + " painting=" + entryOfState(src, slot) + "x" + countOfState(src, slot)
+                        + " confirmed=" + entryOfState(mine, slot) + "x" + countOfState(mine, slot)
+                        + " head=" + entryOfState(h, slot) + "x" + countOfState(h, slot)
+                        + " confirmedTick=" + confirmed.tick
+                        + " headTick=" + (head == null ? -1 : head.tick));
             }
             inv.setItem(slot, stackFor(confirmed, plan.view(slot), slot));
             wrote = true;
@@ -82,11 +104,20 @@ public final class EdgeInventoryMirror {
 
     private boolean takeResync(int cell) {
         boolean pending = resync[cell];
-        resync[cell] = plan.predicted(cell);
-        return pending || resync[cell];
+        boolean owned = plan.predicted(cell);
+        boolean changedOwner = owned != wasPredicted[cell];
+        wasPredicted[cell] = owned;
+        resync[cell] = false;
+        return pending || changedOwner;
     }
 
     public void resyncAll() {
         Arrays.fill(resync, true);
+    }
+
+    public void resync(int cell) {
+        if (cell >= 0 && cell < resync.length) {
+            resync[cell] = true;
+        }
     }
 }

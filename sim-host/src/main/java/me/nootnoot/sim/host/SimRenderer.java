@@ -35,6 +35,9 @@ public interface SimRenderer {
     default void beginCatchUp(int frames) {
     }
 
+    default void feedPeerCorrection(double dx, double dy, double dz) {
+    }
+
     default void feedLocalCorrection(double dx, double dy, double dz) {
     }
 

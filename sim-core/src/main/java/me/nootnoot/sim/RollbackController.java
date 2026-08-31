@@ -1,5 +1,6 @@
 package me.nootnoot.sim;
 
+import me.nootnoot.sim.state.Authority;
 import java.util.ArrayList;
 import java.util.List;
 import me.nootnoot.sim.state.Arena;
@@ -46,6 +47,10 @@ public final class RollbackController {
     private int resimBudget;
 
     private int inputFloor;
+
+    private double peerCorrX;
+    private double peerCorrY;
+    private double peerCorrZ;
 
     private double localCorrX;
     private double localCorrY;
@@ -260,6 +265,10 @@ public final class RollbackController {
         double preX = current.players[localPlayer].x;
         double preY = current.players[localPlayer].y;
         double preZ = current.players[localPlayer].z;
+        int peer = 1 - localPlayer;
+        double prePeerX = current.players[peer].x;
+        double prePeerY = current.players[peer].y;
+        double prePeerZ = current.players[peer].z;
         current = restored;
         head = frame;
         rollbackCount++;
@@ -272,6 +281,18 @@ public final class RollbackController {
         localCorrX += preX - current.players[localPlayer].x;
         localCorrY += preY - current.players[localPlayer].y;
         localCorrZ += preZ - current.players[localPlayer].z;
+        peerCorrX += current.players[peer].x - prePeerX;
+        peerCorrY += current.players[peer].y - prePeerY;
+        peerCorrZ += current.players[peer].z - prePeerZ;
+    }
+
+    public void drainPeerCorrection(double[] out) {
+        out[0] = peerCorrX;
+        out[1] = peerCorrY;
+        out[2] = peerCorrZ;
+        peerCorrX = 0;
+        peerCorrY = 0;
+        peerCorrZ = 0;
     }
 
     public void drainLocalCorrection(double[] out) {

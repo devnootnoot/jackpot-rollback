@@ -27,7 +27,7 @@ public final class Protocol {
 
     public static final int MAX_PEER_DELAY_ALLOWANCE = 4;
 
-    public static final int CHECKSUM_REV = 173;
+    public static final int CHECKSUM_REV = 184;
 
     public static final int VERSION = (InputCodec.BYTES << 8) | (CHECKSUM_REV & 0xFF);
 

@@ -73,6 +73,8 @@ public final class EdgeInputSource implements InputSource {
     private final Arena arena;
     private static final double CORRECTION_LIFT_LIMIT = 3.0;
 
+    private static final double LOCAL_DIVERGENCE_TRACE_BLOCKS = 0.3;
+
     private final ConcurrentLinkedQueue<UseIntent> useQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<DropIntent> dropQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<InvIntent> invQueue = new ConcurrentLinkedQueue<>();
@@ -430,6 +432,22 @@ public final class EdgeInputSource implements InputSource {
         }
         if (verdict.correction()) {
             correct(loc, verdict, head);
+        }
+        if (EdgeTrace.on()) {
+            PlayerState me = head.players[slot];
+            double ddx = loc.getX() - me.x;
+            double ddy = loc.getY() - me.y;
+            double ddz = loc.getZ() - me.z;
+            double gap = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            if (gap > LOCAL_DIVERGENCE_TRACE_BLOCKS) {
+                EdgeTrace.log("DIVERGE gap=" + String.format(java.util.Locale.ROOT, "%.3f", gap)
+                        + " client=(" + String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f",
+                                loc.getX(), loc.getY(), loc.getZ())
+                        + ") sim=(" + String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f",
+                                me.x, me.y, me.z)
+                        + ") simGround=" + me.onGround + " clientGround=" + player.isOnGround()
+                        + " hold=" + me.impulseHoldTicks + " headTick=" + head.tick);
+            }
         }
 
         int heldSlot = player.getInventory().getHeldItemSlot();
@@ -850,6 +868,13 @@ public final class EdgeInputSource implements InputSource {
                 telemetry.movementCorrectionRefused();
             }
             return;
+        }
+        if (EdgeTrace.on()) {
+            EdgeTrace.log("CORRECTION client=(" + loc.getX() + "," + loc.getY() + "," + loc.getZ()
+                    + ") accepted=(" + verdict.x() + "," + verdict.y() + "," + verdict.z()
+                    + ") resolvedY=" + y + " sim=(" + head.players[slot].x + ","
+                    + head.players[slot].y + "," + head.players[slot].z
+                    + ") violations=" + verdict.violations());
         }
         teleportUnvalidated(new Location(player.getWorld(), verdict.x(), y, verdict.z(),
                 loc.getYaw(), loc.getPitch()));

@@ -64,7 +64,7 @@ public final class StateFacets {
 
     public static final String[] PLAYER_STATE_FIELDS = {
             "x", "y", "z", "vx", "vy", "vz", "yaw", "pitch", "onGround", "sprinting", "sneaking",
-            "swimming", "submergedEye", "jumpCooldown", "fallDistance", "authoritySuspendTicks",
+            "swimming", "submergedEye", "jumpCooldown", "fallDistance", "authoritySuspendTicks", "impulseHoldTicks",
             "impulseVx", "impulseVy", "impulseVz", "impulseSeq",
             "noFallTicks",
             "cageFallTicks", "hasElytra", "gliding", "fireworkTicks", "prevJump",
@@ -319,6 +319,7 @@ public final class StateFacets {
         h[motion] = mixInt(h[motion], p.jumpCooldown);
         h[motion] = mixFloat(h[motion], p.fallDistance);
         h[motion] = mixInt(h[motion], p.authoritySuspendTicks);
+        h[motion] = mixInt(h[motion], p.impulseHoldTicks);
         h[motion] = mixDouble(h[motion], p.impulseVx);
         h[motion] = mixDouble(h[motion], p.impulseVy);
         h[motion] = mixDouble(h[motion], p.impulseVz);
